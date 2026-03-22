@@ -1,0 +1,119 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 220 15% 5%;
+    --foreground: 0 0% 95%;
+
+    --card: 220 15% 8%;
+    --card-foreground: 0 0% 95%;
+
+    --popover: 220 15% 10%;
+    --popover-foreground: 0 0% 95%;
+
+    --primary: 32 94% 53%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 220 15% 14%;
+    --secondary-foreground: 0 0% 85%;
+
+    --muted: 220 12% 12%;
+    --muted-foreground: 220 10% 55%;
+
+    --accent: 32 94% 53%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 220 12% 16%;
+    --input: 220 12% 16%;
+    --ring: 32 94% 53%;
+
+    --radius: 1rem;
+
+    --success: 142 71% 45%;
+    --success-foreground: 0 0% 100%;
+
+    --glass-bg: 220 15% 10%;
+    --glass-border: 220 12% 20%;
+    --glow-orange: 32 94% 53%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+}
+
+@layer components {
+  .glass-card {
+    @apply relative overflow-hidden rounded-2xl border border-border/50;
+    background: linear-gradient(
+      135deg,
+      hsl(var(--glass-bg) / 0.8),
+      hsl(var(--glass-bg) / 0.4)
+    );
+    backdrop-filter: blur(24px);
+    box-shadow:
+      0 0 0 1px hsl(var(--glass-border) / 0.3),
+      0 8px 32px -8px hsl(0 0% 0% / 0.5),
+      inset 0 1px 0 0 hsl(0 0% 100% / 0.04);
+  }
+
+  .glass-card-hover {
+    @apply glass-card transition-all duration-300;
+  }
+  .glass-card-hover:hover {
+    box-shadow:
+      0 0 0 1px hsl(var(--glow-orange) / 0.2),
+      0 12px 40px -8px hsl(0 0% 0% / 0.6),
+      0 0 60px -20px hsl(var(--glow-orange) / 0.15),
+      inset 0 1px 0 0 hsl(0 0% 100% / 0.06);
+    border-color: hsl(var(--glow-orange) / 0.3);
+  }
+
+  .glow-orange {
+    box-shadow: 0 0 40px -10px hsl(var(--glow-orange) / 0.4);
+  }
+
+  .glow-success {
+    box-shadow: 0 0 40px -10px hsl(var(--success) / 0.4);
+  }
+
+  .btn-primary-glow {
+    @apply relative overflow-hidden;
+    box-shadow: 0 0 20px -4px hsl(var(--primary) / 0.4);
+  }
+  .btn-primary-glow:hover {
+    box-shadow: 0 0 30px -4px hsl(var(--primary) / 0.6);
+  }
+
+  .text-gradient-orange {
+    @apply bg-clip-text text-transparent;
+    background-image: linear-gradient(135deg, hsl(32 94% 53%), hsl(28 94% 63%));
+  }
+
+  .bg-grid-pattern {
+    background-image:
+      linear-gradient(hsl(var(--border) / 0.3) 1px, transparent 1px),
+      linear-gradient(90deg, hsl(var(--border) / 0.3) 1px, transparent 1px);
+    background-size: 60px 60px;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}

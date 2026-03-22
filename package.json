@@ -1,0 +1,24 @@
+{
+  "name": "universal-claim-link-rstk",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "compile": "hardhat compile",
+    "postcompile": "node scripts/sync-abi.cjs",
+    "sync:abi": "node scripts/sync-abi.cjs",
+    "test": "hardhat test",
+    "deploy:ignition": "hardhat ignition deploy ignition/modules/UniversalClaimLinks.js",
+    "deploy:local": "hardhat run scripts/deploy-universal-claim-links.js --network hardhat",
+    "deploy:localhost": "hardhat run scripts/deploy-universal-claim-links.js --network localhost",
+    "deploy:rstest": "hardhat run scripts/deploy-universal-claim-links.js --network rootstockTestnet",
+    "sync:frontend-env": "node scripts/sync-frontend-env-from-deployment.cjs"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "dotenv": "^17.3.1",
+    "hardhat": "^2.22.0"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.0.0"
+  }
+}

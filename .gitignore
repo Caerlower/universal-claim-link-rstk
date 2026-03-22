@@ -1,0 +1,11 @@
+node_modules
+artifacts
+cache
+typechain-types
+coverage
+coverage.json
+.env
+.env.*
+frontend/.env
+frontend/.env.*
+deployments/deployment-*.json
