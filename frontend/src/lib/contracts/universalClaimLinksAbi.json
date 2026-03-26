@@ -3,11 +3,6 @@
     "inputs": [
       {
         "internalType": "address",
-        "name": "wrbtc",
-        "type": "address"
-      },
-      {
-        "internalType": "address",
         "name": "rif",
         "type": "address"
       },
@@ -28,6 +23,27 @@
   {
     "inputs": [],
     "name": "ClaimNotFound",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "FailedCall",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "balance",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "needed",
+        "type": "uint256"
+      }
+    ],
+    "name": "InsufficientBalance",
     "type": "error"
   },
   {
@@ -292,7 +308,7 @@
         "type": "uint256"
       },
       {
-        "internalType": "contract IERC20",
+        "internalType": "address",
         "name": "tokenOut",
         "type": "address"
       }
@@ -393,16 +409,7 @@
     "type": "function"
   },
   {
-    "inputs": [],
-    "name": "tokenWRBTC",
-    "outputs": [
-      {
-        "internalType": "contract IERC20",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
+    "stateMutability": "payable",
+    "type": "receive"
   }
 ]

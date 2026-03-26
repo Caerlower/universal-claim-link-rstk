@@ -13,7 +13,7 @@ contract MockERC20 is ERC20 {
         _mint(to, amount);
     }
 
-    /// @dev WETH-style wrap so `UniversalClaimLinks.createClaimNative` can be tested on Hardhat.
+    /// @dev WETH-style wrap — useful for local experiments; native escrow uses `createClaimNative` without WRBTC.
     function deposit() external payable {
         _mint(msg.sender, msg.value);
     }

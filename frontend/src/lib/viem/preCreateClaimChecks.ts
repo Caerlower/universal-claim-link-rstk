@@ -55,12 +55,7 @@ export async function assertCreateClaimPreflight(
     decimals: number;
   },
 ): Promise<void> {
-  const [wbtc, rif, usd, balance, nativeWei] = await Promise.all([
-    readContract(publicClient as never, {
-      address: p.claimLinks,
-      abi: universalClaimLinksAbi,
-      functionName: "tokenWRBTC",
-    }),
+  const [rif, usd, balance] = await Promise.all([
     readContract(publicClient as never, {
       address: p.claimLinks,
       abi: universalClaimLinksAbi,
@@ -77,28 +72,18 @@ export async function assertCreateClaimPreflight(
       functionName: "balanceOf",
       args: [p.owner],
     }),
-    publicClient.getBalance({ address: p.owner }),
   ]);
 
   const t = p.tokenIn.toLowerCase();
-  const supported = [wbtc, rif, usd].map((a) => (a as string).toLowerCase());
+  const supported = [rif, usd].map((addr) => (addr as string).toLowerCase());
   if (!supported.includes(t)) {
     throw new Error(
-      "This token address is not one of the three tokens configured on the deployed claim contract. Check frontend .env matches the contract deployment.",
+      "This token is not supported by the deployed claim contract (expected RIF or USDRIF). Check frontend .env matches deployment.",
     );
   }
   if (balance < p.amountWei) {
     const have = formatUnits(balance, p.decimals);
     const need = formatUnits(p.amountWei, p.decimals);
-    const isWrbtc = t === (wbtc as string).toLowerCase();
-    let hint = "";
-    if (isWrbtc) {
-      if (balance === 0n && nativeWei > 0n) {
-        hint = ` Para/MetaMask “tRBTC” is almost always native testnet RBTC (for gas). This escrow only moves WRBTC (ERC-20) at ${p.tokenIn}—a separate balance. Get WRBTC from a faucet that lists the wrapped token, wrap via Rootstock tooling, or use RIF/USDRIF instead.`;
-      } else if (balance === 0n) {
-        hint = ` You need WRBTC (ERC-20) at ${p.tokenIn}, not native RBTC alone—or use RIF/USDRIF.`;
-      }
-    }
-    throw new Error(`Insufficient balance: have ${have}, need ${need}.${hint}`);
+    throw new Error(`Insufficient balance: have ${have}, need ${need}.`);
   }
 }
