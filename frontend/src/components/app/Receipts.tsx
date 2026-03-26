@@ -1,26 +1,35 @@
 import { useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ExternalLink, Copy } from "lucide-react";
 import { formatUnits } from "viem";
+import { simulateContract, waitForTransactionReceipt, writeContract } from "viem/actions";
+import { toast } from "sonner";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useParaViem } from "@/hooks/useParaViem";
 import { fetchClaimsForAddress } from "@/lib/supabase/claims";
 import { isSupabaseConfigured } from "@/lib/supabase/client";
-import { getAppChain } from "@/lib/viem/appChain";
+import { markClaimCancelled } from "@/lib/supabase/claims";
+import { getAppChain, getPublicClient } from "@/lib/viem/appChain";
+import universalClaimLinksAbi from "@/lib/contracts/universalClaimLinksAbi.json";
+import { getClaimLinksEnv } from "@/lib/contracts/contractConfig";
+import { formatWriteContractError } from "@/lib/viem/txErrors";
 
-type ReceiptTab = "sent" | "received";
+type ReceiptTab = "all" | "sent" | "received";
 
 const statusColors: Record<string, string> = {
-  executed: "bg-primary/15 text-primary",
+  executed: "bg-success/15 text-success",
   open: "bg-amber-500/15 text-amber-300",
   cancelled: "bg-muted text-muted-foreground",
+  reverted: "bg-destructive/15 text-destructive/90",
+  expired: "bg-destructive/15 text-destructive/90",
 };
 
 const short = (v: string) => (v.length > 14 ? `${v.slice(0, 8)}…${v.slice(-6)}` : v);
 
 const Receipts = () => {
-  const { address } = useParaViem();
+  const { address, viemClient, ready } = useParaViem();
+  const queryClient = useQueryClient();
   const [tab, setTab] = useState<ReceiptTab>("sent");
   const explorerBase = import.meta.env.VITE_RSK_EXPLORER_URL?.replace(/\/$/, "") ?? "https://explorer.testnet.rootstock.io";
 
@@ -33,8 +42,66 @@ const Receipts = () => {
   const filtered = useMemo(() => {
     if (!address) return [];
     const addr = address.toLowerCase();
+    if (tab === "all") return data;
     return data.filter((r) => (tab === "sent" ? r.sender === addr : r.receiver === addr));
   }, [address, data, tab]);
+
+  const env = getClaimLinksEnv();
+
+  const { data: chainNowTs } = useQuery({
+    queryKey: ["chainNow", getAppChain().id],
+    enabled: !!address && !!env,
+    queryFn: async () => {
+      const pc = getPublicClient();
+      const block = await pc.getBlock({ blockTag: "latest" });
+      return block.timestamp;
+    },
+    staleTime: 10_000,
+  });
+
+  const [cancellingClaimId, setCancellingClaimId] = useState<string | null>(null);
+
+  const handleCancelClaim = async (claimId: string, chainId: number) => {
+    if (!env || !address || !viemClient || !ready) return;
+    if (!chainNowTs) return;
+    if (cancellingClaimId === claimId) return;
+
+    setCancellingClaimId(claimId);
+    try {
+      const publicClient = getPublicClient();
+      const claimIdBig = BigInt(claimId);
+
+      // Optional preflight to get a better revert reason.
+      await simulateContract(publicClient as never, {
+        address: env.claimLinks,
+        abi: universalClaimLinksAbi,
+        functionName: "cancelClaim",
+        args: [claimIdBig],
+        account: address,
+      } as never);
+
+      const hash = await writeContract(viemClient as never, {
+        chain: getAppChain(),
+        address: env.claimLinks,
+        abi: universalClaimLinksAbi,
+        functionName: "cancelClaim",
+        args: [claimIdBig],
+      } as never);
+
+      const receipt = await waitForTransactionReceipt(viemClient as never, { hash });
+      if (receipt.status !== "success") throw new Error("Cancel claim transaction reverted");
+
+      await markClaimCancelled({ claimId, chainId, cancelledTxHash: hash });
+      await queryClient.invalidateQueries({ queryKey: ["receipts", address.toLowerCase()] });
+
+      toast.success("Funds returned to sender");
+    } catch (e: unknown) {
+      const raw = e instanceof Error ? e.message : "Transaction failed";
+      toast.error(formatWriteContractError(raw));
+    } finally {
+      setCancellingClaimId(null);
+    }
+  };
 
   return (
     <div className="max-w-3xl mx-auto space-y-4">
@@ -50,6 +117,7 @@ const Receipts = () => {
                 <SelectValue placeholder="Filter" />
               </SelectTrigger>
               <SelectContent className="glass-card border border-border/60">
+                <SelectItem value="all">All Links</SelectItem>
                 <SelectItem value="sent">Sent Links</SelectItem>
                 <SelectItem value="received">Received Links</SelectItem>
               </SelectContent>
@@ -75,7 +143,7 @@ const Receipts = () => {
       )}
 
       {address && isSupabaseConfigured && !isLoading && !error && filtered.length === 0 && (
-        <div className="glass rounded-2xl p-6 text-sm text-muted-foreground">No {tab} claim records yet.</div>
+        <div className="glass rounded-2xl p-6 text-sm text-muted-foreground">No claim records yet.</div>
       )}
 
       {filtered.map((r, i) => (
@@ -94,9 +162,38 @@ const Receipts = () => {
                 {r.token_out_symbol ? ` → ${r.token_out_symbol}` : ""}
               </div>
             </div>
-            <span className={`text-xs font-semibold uppercase tracking-wider px-2.5 py-1 rounded-full ${statusColors[r.status] ?? statusColors.open}`}>
-              {r.status}
-            </span>
+            {(() => {
+              const expired = chainNowTs != null ? chainNowTs >= BigInt(r.expiry_ts) : false;
+              const addr = address?.toLowerCase();
+              const isExecuted = r.status === "executed";
+
+              // Contextual labels:
+              // - Receiver: show EXPIRED when chain time >= expiry (even if sender cancelled).
+              // - Sender: show REVERTED when expiry passed and status is still OPEN.
+              // - Executed: always EXECUTED.
+              const isSender = addr != null && r.sender === addr;
+              const isReceiver = addr != null && r.receiver === addr;
+
+              const label =
+                isExecuted
+                  ? "executed"
+                  : expired && r.status !== "executed"
+                    ? isReceiver
+                      ? "expired"
+                      : isSender && r.status === "open"
+                        ? "reverted"
+                        : r.status
+                    : r.status;
+              return (
+                <span
+                  className={`text-xs font-semibold uppercase tracking-wider px-2.5 py-1 rounded-full ${
+                    statusColors[label] ?? statusColors.open
+                  }`}
+                >
+                  {label}
+                </span>
+              );
+            })()}
           </div>
 
           <div className="grid sm:grid-cols-3 gap-4 text-sm mb-5">
@@ -142,6 +239,47 @@ const Receipts = () => {
                 Claim Tx
                 <ExternalLink className="w-3.5 h-3.5" />
               </a>
+            )}
+
+            {r.status === "cancelled" &&
+              (r.cancelled_tx_hash ? (
+                <a
+                  href={`${explorerBase}/tx/${r.cancelled_tx_hash}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm border border-border/60 hover:border-primary/25 text-foreground"
+                >
+                Refund Tx
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </a>
+              ) : (
+                tab === "sent" && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      toast.error(
+                        "Refund Tx hash isn’t stored for this record yet. Cancel again using “Get your funds back” to populate it."
+                      )
+                    }
+                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm border border-border/60 text-muted-foreground disabled:opacity-50"
+                  >
+                    Refund Tx
+                  </button>
+                )
+              ))}
+
+            {r.status === "open" &&
+              chainNowTs != null &&
+              BigInt(r.expiry_ts) <= chainNowTs &&
+              address?.toLowerCase() === r.sender && (
+              <button
+                type="button"
+                onClick={() => void handleCancelClaim(r.claim_id, r.chain_id)}
+                disabled={cancellingClaimId === r.claim_id}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm border border-border/60 hover:border-primary/25 text-foreground disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {cancellingClaimId === r.claim_id ? "Cancelling…" : "Get your funds back"}
+              </button>
             )}
           </div>
         </motion.div>

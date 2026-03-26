@@ -7,7 +7,7 @@ import ClaimFundsPage from "@/pages/ClaimFunds";
 import { useParaViem } from "@/hooks/useParaViem";
 import { fetchClaimsForAddress } from "@/lib/supabase/claims";
 import { isSupabaseConfigured } from "@/lib/supabase/client";
-import { getAppChain } from "@/lib/viem/appChain";
+import { getAppChain, getPublicClient } from "@/lib/viem/appChain";
 
 type ClaimFundsProps = {
   initialClaimId?: string | null;
@@ -38,6 +38,20 @@ const ClaimFunds = ({ initialClaimId = null }: ClaimFundsProps) => {
     queryKey: ["claim-tab-received", address?.toLowerCase()],
     enabled: !!address && isSupabaseConfigured,
     queryFn: async () => fetchClaimsForAddress(address!, getAppChain().id),
+  });
+
+  // Use chain time for expiry badge so we don't depend on the user's device clock.
+  const { data: chainNowTs } = useQuery({
+    queryKey: ["chainNow", getAppChain().id],
+    enabled: isSupabaseConfigured && !!address,
+    queryFn: async () => {
+      const pc = getPublicClient();
+      const block = await pc.getBlock({ blockTag: "latest" });
+      return block.timestamp;
+    },
+    staleTime: 10_000,
+    refetchInterval: 5_000,
+    refetchIntervalInBackground: true,
   });
 
   const receivedClaims = useMemo(() => {
@@ -123,26 +137,46 @@ const ClaimFunds = ({ initialClaimId = null }: ClaimFundsProps) => {
               activeClaimId === searchedClaimId ? "border-primary/35" : "border-border/40"
             }`}
           >
-            <div>
-              <div className="text-sm font-semibold text-foreground">Search Result · Claim #{searchedClaimId}</div>
-              <div className="text-xs text-muted-foreground mt-1">Manual lookup from search input.</div>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setActiveClaimId(searchedClaimId)}
-                className="px-3 py-2 rounded-lg border border-border/60 text-sm text-foreground hover:border-primary/30"
-              >
-                View Details
-              </button>
-              <button
-                type="button"
-                onClick={() => setSearchedClaimId(null)}
-                className="p-1.5 rounded-md hover:bg-muted/40 text-muted-foreground"
-                aria-label="Remove search result"
-              >
-                <X className="w-4 h-4" />
-              </button>
+            <div className="w-full">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-foreground">Search Result · Claim #{searchedClaimId}</div>
+                  <div className="text-xs text-muted-foreground mt-1">Manual lookup from search input.</div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setActiveClaimId(searchedClaimId)}
+                    className="px-3 py-2 rounded-lg border border-border/60 text-sm text-foreground hover:border-primary/30"
+                  >
+                    View Details
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSearchedClaimId(null)}
+                    className="p-1.5 rounded-md hover:bg-muted/40 text-muted-foreground"
+                    aria-label="Remove search result"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              {activeClaimId === searchedClaimId && (
+                <div className="mt-4 glass rounded-2xl p-4 border border-border/40">
+                  <div className="flex justify-between items-center mb-3">
+                    <h4 className="text-sm font-semibold text-foreground">Claim Details · #{activeClaimId}</h4>
+                    <button
+                      type="button"
+                      onClick={() => setActiveClaimId(null)}
+                      className="text-xs text-muted-foreground hover:text-foreground px-2 py-1 rounded-md hover:bg-muted/40"
+                    >
+                      Close
+                    </button>
+                  </div>
+                  <ClaimFundsPage claimIdOverride={activeClaimId} embedded />
+                </div>
+              )}
             </div>
           </motion.div>
         )}
@@ -165,14 +199,20 @@ const ClaimFunds = ({ initialClaimId = null }: ClaimFundsProps) => {
                 </div>
                 <span
                   className={`text-[10px] uppercase tracking-wider px-2.5 py-1 rounded-full font-semibold ${
-                    c.status === "open"
-                      ? "bg-amber-500/15 text-amber-300"
-                      : c.status === "executed"
-                        ? "bg-primary/15 text-primary"
-                        : "bg-muted text-muted-foreground"
+                    c.status === "executed"
+                      ? "bg-success/15 text-success"
+                      : chainNowTs != null && chainNowTs >= BigInt(c.expiry_ts)
+                        ? "bg-destructive/15 text-destructive/90"
+                        : c.status === "open"
+                          ? "bg-amber-500/15 text-amber-300"
+                          : "bg-muted text-muted-foreground"
                   }`}
                 >
-                  {c.status}
+                  {c.status === "executed"
+                    ? c.status
+                    : chainNowTs != null && chainNowTs >= BigInt(c.expiry_ts)
+                      ? "expired"
+                      : c.status}
                 </span>
               </div>
               <div className="grid sm:grid-cols-3 gap-3 mt-4 text-xs">
@@ -194,25 +234,25 @@ const ClaimFunds = ({ initialClaimId = null }: ClaimFundsProps) => {
                   </button>
                 </div>
               </div>
+
+              {activeClaimId === c.claim_id && (
+                <div className="mt-4 glass rounded-2xl p-4 border border-border/40">
+                  <div className="flex justify-between items-center mb-3">
+                    <h4 className="text-sm font-semibold text-foreground">Claim Details · #{activeClaimId}</h4>
+                    <button
+                      type="button"
+                      onClick={() => setActiveClaimId(null)}
+                      className="text-xs text-muted-foreground hover:text-foreground px-2 py-1 rounded-md hover:bg-muted/40"
+                    >
+                      Close
+                    </button>
+                  </div>
+                  <ClaimFundsPage claimIdOverride={activeClaimId} embedded />
+                </div>
+              )}
             </motion.div>
           ))}
       </div>
-
-      {activeClaimId && (
-        <div className="mt-6 glass rounded-2xl p-4 border border-border/40">
-          <div className="flex justify-between items-center mb-3">
-            <h4 className="text-sm font-semibold text-foreground">Claim Details · #{activeClaimId}</h4>
-            <button
-              type="button"
-              onClick={() => setActiveClaimId(null)}
-              className="text-xs text-muted-foreground hover:text-foreground px-2 py-1 rounded-md hover:bg-muted/40"
-            >
-              Close
-            </button>
-          </div>
-          <ClaimFundsPage claimIdOverride={activeClaimId} embedded />
-        </div>
-      )}
     </div>
   );
 };

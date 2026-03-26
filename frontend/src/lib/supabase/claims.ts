@@ -14,6 +14,7 @@ export type ClaimRecord = {
   expiry_ts: string;
   created_tx_hash: string | null;
   executed_tx_hash: string | null;
+  cancelled_tx_hash: string | null;
   executed_by: string | null;
   created_at: string;
   updated_at: string;
@@ -64,6 +65,24 @@ export async function markClaimExecuted(input: {
       amount_out_wei: input.amountOutWei,
       executed_by: input.executedBy.toLowerCase(),
       executed_tx_hash: input.executedTxHash ?? null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("claim_id", input.claimId)
+    .eq("chain_id", input.chainId);
+  if (error) throw error;
+}
+
+export async function markClaimCancelled(input: {
+  claimId: string;
+  chainId: number;
+  cancelledTxHash?: string;
+}): Promise<void> {
+  if (!isSupabaseConfigured || !supabase) return;
+  const { error } = await supabase
+    .from("claim_links")
+    .update({
+      status: "cancelled",
+      cancelled_tx_hash: input.cancelledTxHash ?? null,
       updated_at: new Date().toISOString(),
     })
     .eq("claim_id", input.claimId)

@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
@@ -14,7 +15,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 /// enough `tokenOut` balance to pay (operational liquidity). Escrowed `tokenIn` stays in the contract after
 /// execution unless the sender cancels after expiry.
 /// @dev `Claim.tokenIn == address(0)` denotes native RBTC (tRBTC / RBTC) held in this contract’s balance.
-contract UniversalClaimLinks is ReentrancyGuard {
+contract UniversalClaimLinks is ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
 
     uint8 internal constant STATUS_OPEN = 0;
@@ -22,6 +23,7 @@ contract UniversalClaimLinks is ReentrancyGuard {
     uint8 internal constant STATUS_CANCELLED = 2;
 
     uint256 internal constant RATE_SCALE = 1e18;
+    uint40 internal constant MAX_EXPIRY_DURATION = 30 days;
 
     /// @dev Sentinel for native RBTC in `Claim.tokenIn` (not an ERC-20).
     address internal constant TOKEN_NATIVE = address(0);
@@ -41,6 +43,7 @@ contract UniversalClaimLinks is ReentrancyGuard {
 
     IERC20 public immutable tokenRIF;
     IERC20 public immutable tokenUSDRIF;
+    address public owner;
 
     uint256 public nextClaimId;
 
@@ -74,6 +77,7 @@ contract UniversalClaimLinks is ReentrancyGuard {
     );
 
     event ClaimCancelled(uint256 indexed claimId, address indexed sender, address tokenIn, uint256 amountIn);
+    event LiquidityDeposited(address indexed sender, uint256 amount);
 
     error ZeroAddress();
     error InvalidReceiver();
@@ -87,6 +91,12 @@ contract UniversalClaimLinks is ReentrancyGuard {
     error ClaimExpired();
     error NotExpired();
     error InsufficientLiquidity();
+    error NotOwner();
+
+    modifier onlyOwner() {
+        if (msg.sender != owner) revert NotOwner();
+        _;
+    }
 
     constructor(address rif, address usdrif) {
         if (rif == address(0) || usdrif == address(0)) revert ZeroAddress();
@@ -96,19 +106,24 @@ contract UniversalClaimLinks is ReentrancyGuard {
         tokenUSDRIF = IERC20(usdrif);
 
         nextClaimId = 1;
+        owner = msg.sender;
     }
 
     /// @notice Accept native RBTC deposits (used to pre-fund payout liquidity for native outputs).
-    receive() external payable {}
+    receive() external payable {
+        emit LiquidityDeposited(msg.sender, msg.value);
+    }
 
     function createClaim(address receiver, IERC20 tokenIn, uint128 amountIn, uint40 expiry)
         external
         nonReentrant
+        whenNotPaused
         returns (uint256 claimId)
     {
-        if (receiver == address(0) || receiver == msg.sender) revert InvalidReceiver();
+        if (receiver == address(0) || receiver == msg.sender || receiver == address(this)) revert InvalidReceiver();
         if (amountIn == 0) revert InvalidAmount();
         if (expiry <= block.timestamp) revert InvalidExpiry();
+        if (expiry > block.timestamp + MAX_EXPIRY_DURATION) revert InvalidExpiry();
         if (address(tokenIn) == TOKEN_NATIVE) revert UnsupportedToken();
         if (!_isSupported(tokenIn)) revert UnsupportedToken();
 
@@ -136,11 +151,13 @@ contract UniversalClaimLinks is ReentrancyGuard {
         external
         payable
         nonReentrant
+        whenNotPaused
         returns (uint256 claimId)
     {
-        if (receiver == address(0) || receiver == msg.sender) revert InvalidReceiver();
+        if (receiver == address(0) || receiver == msg.sender || receiver == address(this)) revert InvalidReceiver();
         if (msg.value == 0) revert InvalidAmount();
         if (expiry <= block.timestamp) revert InvalidExpiry();
+        if (expiry > block.timestamp + MAX_EXPIRY_DURATION) revert InvalidExpiry();
         if (msg.value > type(uint128).max) revert InvalidAmount();
 
         uint256 received = msg.value;
@@ -165,6 +182,7 @@ contract UniversalClaimLinks is ReentrancyGuard {
         if (block.timestamp >= c.expiry) revert ClaimExpired();
         if (msg.sender != c.receiver) revert NotReceiver();
         if (!_isSupportedTokenOut(tokenOut)) revert UnsupportedToken();
+        if (tokenOut == c.tokenIn) revert UnsupportedToken();
 
         uint256 rate = _conversionRate(c.tokenIn, tokenOut);
         if (rate == 0) revert UnsupportedToken();
@@ -205,6 +223,22 @@ contract UniversalClaimLinks is ReentrancyGuard {
         }
 
         emit ClaimCancelled(claimId, c.sender, c.tokenIn, c.amountIn);
+    }
+
+    function sweep(address token, uint256 amount) external onlyOwner {
+        if (token == TOKEN_NATIVE) {
+            Address.sendValue(payable(owner), amount);
+        } else {
+            IERC20(token).safeTransfer(owner, amount);
+        }
+    }
+
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    function unpause() external onlyOwner {
+        _unpause();
     }
 
     function getClaim(uint256 claimId) external view returns (Claim memory) {

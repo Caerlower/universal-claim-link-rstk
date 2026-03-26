@@ -29,6 +29,14 @@ type ClaimFundsProps = {
 };
 
 const STATUS_OPEN = 0;
+type ClaimFromContract = {
+  amountIn: bigint;
+  expiry: bigint;
+  status: bigint;
+  sender: `0x${string}`;
+  receiver: `0x${string}`;
+  tokenIn: `0x${string}`;
+};
 
 const tokenOptions: { symbol: SupportedSymbol; name: string; logoUrl: string }[] = [
   {
@@ -68,18 +76,34 @@ const ClaimFunds = ({ claimIdOverride, embedded = false }: ClaimFundsProps) => {
     }
   }, [id]);
 
-  const { data: claim, refetch } = useQuery({
+  const { data: claim, refetch } = useQuery<ClaimFromContract>({
     queryKey: ["claim", env?.claimLinks, claimId?.toString()],
     enabled: !!env && claimId != null,
     queryFn: async () => {
       const pc = getPublicClient();
-      return readContract(pc, {
+      const res = await readContract(
+        pc as unknown as Parameters<typeof readContract>[0],
+        {
         address: env!.claimLinks,
         abi: universalClaimLinksAbi,
         functionName: "getClaim",
         args: [claimId!],
-      });
+        } as unknown as Parameters<typeof readContract>[1]
+      );
+      return res as ClaimFromContract;
     },
+  });
+
+  // Use chain time (RPC block timestamp) for expiry checks so UI doesn't depend on the user's system clock.
+  const { data: chainNowTs } = useQuery<bigint>({
+    queryKey: ["chainNow", env?.claimLinks, getAppChain().id],
+    enabled: !!env && claimId != null,
+    queryFn: async () => {
+      const pc = getPublicClient();
+      const block = await pc.getBlock({ blockTag: "latest" });
+      return block.timestamp;
+    },
+    staleTime: 10_000,
   });
 
   const explorerBase =
@@ -97,6 +121,10 @@ const ClaimFunds = ({ claimIdOverride, embedded = false }: ClaimFundsProps) => {
   const isReceiver =
     !!address && !!claim?.receiver && address.toLowerCase() === claim.receiver.toLowerCase();
   const claimStatus = claim != null ? Number(claim.status) : -1;
+
+  const isExpired =
+    claim != null && chainNowTs != null ? chainNowTs >= BigInt(claim.expiry) : false;
+
   const canClaim =
     claim != null &&
     claimStatus === STATUS_OPEN &&
@@ -105,7 +133,8 @@ const ClaimFunds = ({ claimIdOverride, embedded = false }: ClaimFundsProps) => {
     env &&
     !!viemClient &&
     ready &&
-    BigInt(Math.floor(Date.now() / 1000)) < BigInt(claim.expiry);
+    chainNowTs != null &&
+    chainNowTs < BigInt(claim.expiry);
 
   const handleClaim = async () => {
     if (!env || claimId == null || !claim || !viemClient) return;
@@ -113,6 +142,7 @@ const ClaimFunds = ({ claimIdOverride, embedded = false }: ClaimFundsProps) => {
       toast.error("Connect with Para");
       return;
     }
+    if (!address) return;
     if (!isReceiver) {
       toast.error("Only the designated receiver can claim.");
       return;
@@ -121,7 +151,8 @@ const ClaimFunds = ({ claimIdOverride, embedded = false }: ClaimFundsProps) => {
       toast.error("This claim is not open.");
       return;
     }
-    if (BigInt(Math.floor(Date.now() / 1000)) >= BigInt(claim.expiry)) {
+    // Final guard before sending tx (contract will also enforce this).
+    if (chainNowTs != null && chainNowTs >= BigInt(claim.expiry)) {
       toast.error("This claim has expired.");
       return;
     }
@@ -130,6 +161,7 @@ const ClaimFunds = ({ claimIdOverride, embedded = false }: ClaimFundsProps) => {
     setState("loading");
     setLastTxHash(undefined);
 
+    const account = address;
     try {
       const writeClient = viemClient as unknown as ViemWriteClient;
       const publicClient = getPublicClient();
@@ -142,6 +174,7 @@ const ClaimFunds = ({ claimIdOverride, embedded = false }: ClaimFundsProps) => {
           abi: universalClaimLinksAbi,
           functionName: "executeClaim",
           args: [claimId, out],
+          account,
         });
       } catch (e) {
         // Fallback: simulation to get a readable revert reason.
@@ -150,7 +183,7 @@ const ClaimFunds = ({ claimIdOverride, embedded = false }: ClaimFundsProps) => {
           abi: universalClaimLinksAbi,
           functionName: "executeClaim",
           args: [claimId, out],
-          account: address,
+          account,
         } as never);
         throw e;
       }
@@ -258,7 +291,13 @@ const ClaimFunds = ({ claimIdOverride, embedded = false }: ClaimFundsProps) => {
                 <div className="flex items-center justify-between text-sm">
                   <span className="text-muted-foreground">Status</span>
                   <span className="text-foreground text-xs">
-                    {claimStatus === 0 ? "Open" : claimStatus === 1 ? "Executed" : "Cancelled"}
+                    {claimStatus === 1
+                      ? "Executed"
+                      : isExpired
+                        ? "Expired"
+                        : claimStatus === 2
+                          ? "Cancelled"
+                          : "Open"}
                   </span>
                 </div>
               </div>
@@ -327,7 +366,10 @@ const ClaimFunds = ({ claimIdOverride, embedded = false }: ClaimFundsProps) => {
               {isConnected && ready && !isReceiver && (
                 <p className="text-xs text-destructive/90 text-center">Connected wallet is not the receiver for this claim.</p>
               )}
-              {claimStatus !== STATUS_OPEN && (
+              {isExpired && claimStatus !== 1 && (
+                <p className="text-xs text-destructive/90 text-center">This claim has expired.</p>
+              )}
+              {!isExpired && claimStatus !== STATUS_OPEN && (
                 <p className="text-xs text-muted-foreground text-center">This claim cannot be executed.</p>
               )}
 

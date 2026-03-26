@@ -31,6 +31,9 @@
     --destructive: 0 72% 51%;
     --destructive-foreground: 40 20% 95%;
 
+    --success: 142 76% 45%;
+    --success-foreground: 144 3% 98%;
+
     --border: 220 10% 24%;
     --input: 220 10% 18%;
     --ring: 24 90% 55%;
@@ -78,6 +81,9 @@
     --input: 220 12% 90%;
     --ring: 24 90% 52%;
 
+    --success: 142 70% 38%;
+    --success-foreground: 210 20% 10%;
+
     --glass: 0 0% 100%;
     --glass-border: 220 12% 84%;
 
@@ -119,6 +125,10 @@
 
   .glow-orange {
     box-shadow: 0 0 60px -12px hsl(var(--primary) / 0.3);
+  }
+
+  .glow-success {
+    box-shadow: 0 0 60px -12px hsl(var(--success) / 0.3);
   }
 
   .glow-orange-sm {

@@ -8,204 +8,427 @@ describe("UniversalClaimLinks", function () {
   const STATUS_CANCELLED = 2n;
 
   async function deployFixture() {
-    const [deployer, sender, receiver] = await ethers.getSigners();
+    const [deployer, sender, receiver, stranger] = await ethers.getSigners();
 
     const MockERC20 = await ethers.getContractFactory("MockERC20");
     const rif = await MockERC20.deploy("RIF", "RIF");
     const usdrif = await MockERC20.deploy("USDRIF", "USDRIF");
 
     const UniversalClaimLinks = await ethers.getContractFactory("UniversalClaimLinks");
-    const claimLinks = await UniversalClaimLinks.deploy(await rif.getAddress(), await usdrif.getAddress());
+    const claimLinks = await UniversalClaimLinks.deploy(
+      await rif.getAddress(),
+      await usdrif.getAddress()
+    );
 
     const amount = ethers.parseEther("1");
-    await rif.mint(sender.address, amount);
     await rif.mint(sender.address, ethers.parseEther("1000000"));
     await usdrif.mint(sender.address, ethers.parseEther("1000000"));
 
-    return { deployer, sender, receiver, rif, usdrif, claimLinks, amount };
+    return { deployer, sender, receiver, stranger, rif, usdrif, claimLinks, amount };
   }
 
-  it("creates a claim and escrows tokens", async function () {
-    const { sender, receiver, rif, claimLinks, amount } = await deployFixture();
+  // ─── createClaim ────────────────────────────────────────────────────────────
 
-    const latest = await time.latest();
-    const expiry = BigInt(latest) + 3600n;
+  describe("createClaim", function () {
+    it("escrows tokens and stores claim correctly", async function () {
+      const { sender, receiver, rif, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 3600n;
 
-    await rif.connect(sender).approve(await claimLinks.getAddress(), amount);
+      await rif.connect(sender).approve(await claimLinks.getAddress(), amount);
+      await claimLinks.connect(sender).createClaim(
+        receiver.address, await rif.getAddress(), amount, expiry
+      );
 
-    await claimLinks.connect(sender).createClaim(receiver.address, await rif.getAddress(), amount, expiry);
+      const c = await claimLinks.getClaim(1n);
+      expect(c.amountIn).to.equal(amount);
+      expect(c.expiry).to.equal(expiry);
+      expect(c.status).to.equal(STATUS_OPEN);
+      expect(c.sender).to.equal(sender.address);
+      expect(c.receiver).to.equal(receiver.address);
+      expect(c.tokenIn).to.equal(await rif.getAddress());
+      expect(await rif.balanceOf(await claimLinks.getAddress())).to.equal(amount);
+    });
 
-    const c = await claimLinks.getClaim(1n);
-    expect(c.amountIn).to.equal(amount);
-    expect(c.expiry).to.equal(expiry);
-    expect(c.status).to.equal(STATUS_OPEN);
-    expect(c.sender).to.equal(sender.address);
-    expect(c.receiver).to.equal(receiver.address);
-    expect(c.tokenIn).to.equal(await rif.getAddress());
+    it("reverts if receiver is zero address", async function () {
+      const { sender, rif, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 3600n;
+      await rif.connect(sender).approve(await claimLinks.getAddress(), amount);
+      await expect(
+        claimLinks.connect(sender).createClaim(
+          ethers.ZeroAddress, await rif.getAddress(), amount, expiry
+        )
+      ).to.be.revertedWithCustomError(claimLinks, "InvalidReceiver");
+    });
 
-    expect(await rif.balanceOf(await claimLinks.getAddress())).to.equal(amount);
+    it("reverts if receiver is sender", async function () {
+      const { sender, rif, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 3600n;
+      await rif.connect(sender).approve(await claimLinks.getAddress(), amount);
+      await expect(
+        claimLinks.connect(sender).createClaim(
+          sender.address, await rif.getAddress(), amount, expiry
+        )
+      ).to.be.revertedWithCustomError(claimLinks, "InvalidReceiver");
+    });
+
+    // FIX 3 coverage
+    it("reverts if receiver is the contract itself", async function () {
+      const { sender, rif, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 3600n;
+      await rif.connect(sender).approve(await claimLinks.getAddress(), amount);
+      await expect(
+        claimLinks.connect(sender).createClaim(
+          await claimLinks.getAddress(), await rif.getAddress(), amount, expiry
+        )
+      ).to.be.revertedWithCustomError(claimLinks, "InvalidReceiver");
+    });
+
+    // FIX 4 coverage
+    it("reverts if expiry exceeds MAX_EXPIRY_DURATION", async function () {
+      const { sender, receiver, rif, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 31n * 24n * 3600n; // 31 days
+      await rif.connect(sender).approve(await claimLinks.getAddress(), amount);
+      await expect(
+        claimLinks.connect(sender).createClaim(
+          receiver.address, await rif.getAddress(), amount, expiry
+        )
+      ).to.be.revertedWithCustomError(claimLinks, "InvalidExpiry");
+    });
+
+    it("reverts if expiry is in the past", async function () {
+      const { sender, receiver, rif, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) - 1n;
+      await rif.connect(sender).approve(await claimLinks.getAddress(), amount);
+      await expect(
+        claimLinks.connect(sender).createClaim(
+          receiver.address, await rif.getAddress(), amount, expiry
+        )
+      ).to.be.revertedWithCustomError(claimLinks, "InvalidExpiry");
+    });
+
+    it("reverts for unsupported tokenIn", async function () {
+      const { sender, receiver, claimLinks, amount } = await deployFixture();
+      const MockERC20 = await ethers.getContractFactory("MockERC20");
+      const other = await MockERC20.deploy("OTHER", "OTHER");
+      const expiry = BigInt(await time.latest()) + 3600n;
+      await other.mint(sender.address, amount);
+      await other.connect(sender).approve(await claimLinks.getAddress(), amount);
+      await expect(
+        claimLinks.connect(sender).createClaim(
+          receiver.address, await other.getAddress(), amount, expiry
+        )
+      ).to.be.revertedWithCustomError(claimLinks, "UnsupportedToken");
+    });
+
+    // FIX 6 coverage
+    it("reverts when paused", async function () {
+      const { deployer, sender, receiver, rif, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 3600n;
+      await claimLinks.connect(deployer).pause();
+      await rif.connect(sender).approve(await claimLinks.getAddress(), amount);
+      await expect(
+        claimLinks.connect(sender).createClaim(
+          receiver.address, await rif.getAddress(), amount, expiry
+        )
+      ).to.be.revertedWithCustomError(claimLinks, "EnforcedPause");
+    });
   });
 
-  it("executes a claim once and pays the chosen output token (same token 1:1)", async function () {
-    const { sender, receiver, rif, claimLinks, amount } = await deployFixture();
+  // ─── createClaimNative ──────────────────────────────────────────────────────
 
-    const latest = await time.latest();
-    const expiry = BigInt(latest) + 3600n;
-    const expectedRifOut = amount;
+  describe("createClaimNative", function () {
+    it("escrows RBTC and stores tokenIn as zero address", async function () {
+      const { sender, receiver, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 3600n;
 
-    await rif.connect(sender).approve(await claimLinks.getAddress(), amount);
-    await claimLinks.connect(sender).createClaim(receiver.address, await rif.getAddress(), amount, expiry);
+      await claimLinks.connect(sender).createClaimNative(receiver.address, expiry, { value: amount });
 
-    const before = await rif.balanceOf(receiver.address);
-    await claimLinks.connect(receiver).executeClaim(1n, await rif.getAddress());
+      expect(await ethers.provider.getBalance(await claimLinks.getAddress())).to.equal(amount);
+      const c = await claimLinks.getClaim(1n);
+      expect(c.tokenIn).to.equal(ethers.ZeroAddress);
+      expect(c.amountIn).to.equal(amount);
+    });
 
-    expect((await rif.balanceOf(receiver.address)) - before).to.equal(expectedRifOut);
-    expect((await claimLinks.getClaim(1n)).status).to.equal(STATUS_EXECUTED);
+    // FIX 3 coverage
+    it("reverts if receiver is the contract itself", async function () {
+      const { sender, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 3600n;
+      await expect(
+        claimLinks.connect(sender).createClaimNative(
+          await claimLinks.getAddress(), expiry, { value: amount }
+        )
+      ).to.be.revertedWithCustomError(claimLinks, "InvalidReceiver");
+    });
+
+    // FIX 4 coverage
+    it("reverts if expiry exceeds MAX_EXPIRY_DURATION", async function () {
+      const { sender, receiver, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 31n * 24n * 3600n;
+      await expect(
+        claimLinks.connect(sender).createClaimNative(receiver.address, expiry, { value: amount })
+      ).to.be.revertedWithCustomError(claimLinks, "InvalidExpiry");
+    });
+
+    // FIX 5 coverage
+    it("emits LiquidityDeposited when RBTC sent to receive()", async function () {
+      const { deployer, claimLinks, amount } = await deployFixture();
+      await expect(
+        deployer.sendTransaction({ to: await claimLinks.getAddress(), value: amount })
+      ).to.emit(claimLinks, "LiquidityDeposited").withArgs(deployer.address, amount);
+    });
   });
 
-  it("executes native claim into RIF at RBTC→RIF rate", async function () {
-    const { sender, receiver, rif, claimLinks, amount } = await deployFixture();
-    const latest = await time.latest();
-    const expiry = BigInt(latest) + 3600n;
-    const expectedRifOut = (amount * 50_000n * 10n ** 18n) / 10n ** 18n;
+  // ─── executeClaim ───────────────────────────────────────────────────────────
 
-    await claimLinks.connect(sender).createClaimNative(receiver.address, expiry, { value: amount });
-    await rif.mint(await claimLinks.getAddress(), expectedRifOut);
+  describe("executeClaim", function () {
+    it("pays RIF→USDRIF at configured rate", async function () {
+      const { sender, receiver, rif, usdrif, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 3600n;
+      const expectedOut = (amount * 1_900_000_000_000_000_000n) / 10n ** 18n;
 
-    const before = await rif.balanceOf(receiver.address);
-    await claimLinks.connect(receiver).executeClaim(1n, await rif.getAddress());
-    expect((await rif.balanceOf(receiver.address)) - before).to.equal(expectedRifOut);
-    expect((await claimLinks.getClaim(1n)).status).to.equal(STATUS_EXECUTED);
-  });
+      await rif.connect(sender).approve(await claimLinks.getAddress(), amount);
+      await claimLinks.connect(sender).createClaim(receiver.address, await rif.getAddress(), amount, expiry);
+      await usdrif.mint(await claimLinks.getAddress(), expectedOut);
 
-  it("executes native claim into native RBTC (1:1)", async function () {
-    const { sender, receiver, claimLinks, amount } = await deployFixture();
-    const latest = await time.latest();
-    const expiry = BigInt(latest) + 3600n;
+      const before = await usdrif.balanceOf(receiver.address);
+      await claimLinks.connect(receiver).executeClaim(1n, await usdrif.getAddress());
 
-    await claimLinks.connect(sender).createClaimNative(receiver.address, expiry, { value: amount });
+      expect((await usdrif.balanceOf(receiver.address)) - before).to.equal(expectedOut);
+      expect((await claimLinks.getClaim(1n)).status).to.equal(STATUS_EXECUTED);
+    });
 
-    const before = await ethers.provider.getBalance(receiver.address);
-    await claimLinks.connect(receiver).executeClaim(1n, ethers.ZeroAddress);
-    const after = await ethers.provider.getBalance(receiver.address);
+    it("pays native→RIF at RBTC→RIF rate", async function () {
+      const { sender, receiver, rif, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 3600n;
+      const expectedOut = (amount * 50_000n * 10n ** 18n) / 10n ** 18n;
 
-    expect(after > before).to.equal(true);
-  });
+      await claimLinks.connect(sender).createClaimNative(receiver.address, expiry, { value: amount });
+      await rif.mint(await claimLinks.getAddress(), expectedOut);
 
-  it("executes RIF claim into native RBTC at RIF→RBTC rate (requires RBTC liquidity)", async function () {
-    const { sender, receiver, rif, claimLinks, amount } = await deployFixture();
-    const latest = await time.latest();
-    const expiry = BigInt(latest) + 3600n;
-
-    // Use a large RIF input so RBTC payout exceeds receiver gas costs.
-    const bigAmount = ethers.parseEther("100000");
-    await rif.connect(sender).approve(await claimLinks.getAddress(), bigAmount);
-    await claimLinks.connect(sender).createClaim(receiver.address, await rif.getAddress(), bigAmount, expiry);
-
-    // Provide RBTC liquidity to pay out.
-    const expectedRbtcOut = (bigAmount * 20_000_000_000_000n) / 10n ** 18n; // amount * RATE_RIF_TO_RBTC / 1e18
-    await sender.sendTransaction({ to: await claimLinks.getAddress(), value: expectedRbtcOut });
-
-    const before = await ethers.provider.getBalance(receiver.address);
-    await claimLinks.connect(receiver).executeClaim(1n, ethers.ZeroAddress);
-    const after = await ethers.provider.getBalance(receiver.address);
-    expect(after > before).to.equal(true);
-  });
-
-  it("reverts on second execute (double claim)", async function () {
-    const { sender, receiver, rif, claimLinks, amount } = await deployFixture();
-
-    const latest = await time.latest();
-    const expiry = BigInt(latest) + 3600n;
-
-    await rif.connect(sender).approve(await claimLinks.getAddress(), amount);
-    await claimLinks.connect(sender).createClaim(receiver.address, await rif.getAddress(), amount, expiry);
-
-    await claimLinks.connect(receiver).executeClaim(1n, await rif.getAddress());
-
-    let threw = false;
-    try {
+      const before = await rif.balanceOf(receiver.address);
       await claimLinks.connect(receiver).executeClaim(1n, await rif.getAddress());
-    } catch {
-      threw = true;
-    }
-    expect(threw).to.equal(true);
+      expect((await rif.balanceOf(receiver.address)) - before).to.equal(expectedOut);
+    });
+
+    it("pays native→USDRIF at RBTC→USDRIF rate", async function () {
+      const { sender, receiver, usdrif, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 3600n;
+      const expectedOut = (amount * 95_000n * 10n ** 18n) / 10n ** 18n;
+
+      await claimLinks.connect(sender).createClaimNative(receiver.address, expiry, { value: amount });
+      await usdrif.mint(await claimLinks.getAddress(), expectedOut);
+
+      const before = await usdrif.balanceOf(receiver.address);
+      await claimLinks.connect(receiver).executeClaim(1n, await usdrif.getAddress());
+      expect((await usdrif.balanceOf(receiver.address)) - before).to.equal(expectedOut);
+    });
+
+    it("pays RIF→native RBTC at RIF→RBTC rate", async function () {
+      const { sender, receiver, rif, claimLinks } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 3600n;
+      const bigAmount = ethers.parseEther("100000");
+
+      await rif.connect(sender).approve(await claimLinks.getAddress(), bigAmount);
+      await claimLinks.connect(sender).createClaim(receiver.address, await rif.getAddress(), bigAmount, expiry);
+
+      const expectedOut = (bigAmount * 20_000_000_000_000n) / 10n ** 18n;
+      await sender.sendTransaction({ to: await claimLinks.getAddress(), value: expectedOut });
+
+      const before = await ethers.provider.getBalance(receiver.address);
+      await claimLinks.connect(receiver).executeClaim(1n, ethers.ZeroAddress);
+      expect((await ethers.provider.getBalance(receiver.address)) > before).to.equal(true);
+    });
+
+    // FIX 2 coverage
+    it("reverts on same-token swap (RIF→RIF)", async function () {
+      const { sender, receiver, rif, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 3600n;
+
+      await rif.connect(sender).approve(await claimLinks.getAddress(), amount);
+      await claimLinks.connect(sender).createClaim(receiver.address, await rif.getAddress(), amount, expiry);
+
+      await expect(
+        claimLinks.connect(receiver).executeClaim(1n, await rif.getAddress())
+      ).to.be.revertedWithCustomError(claimLinks, "UnsupportedToken");
+    });
+
+    it("reverts on double execute", async function () {
+      const { sender, receiver, rif, usdrif, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 3600n;
+      const expectedOut = (amount * 1_900_000_000_000_000_000n) / 10n ** 18n;
+
+      await rif.connect(sender).approve(await claimLinks.getAddress(), amount);
+      await claimLinks.connect(sender).createClaim(receiver.address, await rif.getAddress(), amount, expiry);
+      await usdrif.mint(await claimLinks.getAddress(), expectedOut);
+      await claimLinks.connect(receiver).executeClaim(1n, await usdrif.getAddress());
+
+      await expect(
+        claimLinks.connect(receiver).executeClaim(1n, await usdrif.getAddress())
+      ).to.be.revertedWithCustomError(claimLinks, "NotOpen");
+    });
+
+    it("reverts when called by non-receiver", async function () {
+      const { sender, receiver, stranger, rif, usdrif, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 3600n;
+
+      await rif.connect(sender).approve(await claimLinks.getAddress(), amount);
+      await claimLinks.connect(sender).createClaim(receiver.address, await rif.getAddress(), amount, expiry);
+
+      await expect(
+        claimLinks.connect(stranger).executeClaim(1n, await usdrif.getAddress())
+      ).to.be.revertedWithCustomError(claimLinks, "NotReceiver");
+    });
+
+    it("reverts after expiry", async function () {
+      const { sender, receiver, rif, usdrif, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 100n;
+
+      await rif.connect(sender).approve(await claimLinks.getAddress(), amount);
+      await claimLinks.connect(sender).createClaim(receiver.address, await rif.getAddress(), amount, expiry);
+      await time.increaseTo(expiry + 1n);
+
+      await expect(
+        claimLinks.connect(receiver).executeClaim(1n, await usdrif.getAddress())
+      ).to.be.revertedWithCustomError(claimLinks, "ClaimExpired");
+    });
+
+    it("reverts with InsufficientLiquidity if pool cannot cover payout", async function () {
+      const { sender, receiver, rif, usdrif, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 3600n;
+
+      await rif.connect(sender).approve(await claimLinks.getAddress(), amount);
+      await claimLinks.connect(sender).createClaim(receiver.address, await rif.getAddress(), amount, expiry);
+      // deliberately do NOT fund the contract with usdrif
+
+      await expect(
+        claimLinks.connect(receiver).executeClaim(1n, await usdrif.getAddress())
+      ).to.be.revertedWithCustomError(claimLinks, "InsufficientLiquidity");
+    });
   });
 
-  it("after expiry: receiver cannot execute; sender can cancel and reclaim", async function () {
-    const { sender, receiver, rif, claimLinks, amount } = await deployFixture();
+  // ─── cancelClaim ────────────────────────────────────────────────────────────
 
-    const latest = await time.latest();
-    const expiry = BigInt(latest) + 100n;
+  describe("cancelClaim", function () {
+    it("refunds ERC20 to sender after expiry", async function () {
+      const { sender, receiver, rif, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 100n;
 
-    await rif.connect(sender).approve(await claimLinks.getAddress(), amount);
-    await claimLinks.connect(sender).createClaim(receiver.address, await rif.getAddress(), amount, expiry);
+      await rif.connect(sender).approve(await claimLinks.getAddress(), amount);
+      await claimLinks.connect(sender).createClaim(receiver.address, await rif.getAddress(), amount, expiry);
+      await time.increaseTo(expiry + 1n);
 
-    await time.increaseTo(expiry + 1n);
-
-    let threw = false;
-    try {
-      await claimLinks.connect(receiver).executeClaim(1n, await rif.getAddress());
-    } catch {
-      threw = true;
-    }
-    expect(threw).to.equal(true);
-
-    const before = await rif.balanceOf(sender.address);
-    await claimLinks.connect(sender).cancelClaim(1n);
-
-    expect((await rif.balanceOf(sender.address)) - before).to.equal(amount);
-    expect((await claimLinks.getClaim(1n)).status).to.equal(STATUS_CANCELLED);
-
-    threw = false;
-    try {
+      const before = await rif.balanceOf(sender.address);
       await claimLinks.connect(sender).cancelClaim(1n);
-    } catch {
-      threw = true;
-    }
-    expect(threw).to.equal(true);
+      expect((await rif.balanceOf(sender.address)) - before).to.equal(amount);
+      expect((await claimLinks.getClaim(1n)).status).to.equal(STATUS_CANCELLED);
+    });
+
+    it("refunds native RBTC to sender after expiry", async function () {
+      const { sender, receiver, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 100n;
+
+      await claimLinks.connect(sender).createClaimNative(receiver.address, expiry, { value: amount });
+      await time.increaseTo(expiry + 1n);
+
+      const before = await ethers.provider.getBalance(sender.address);
+      await claimLinks.connect(sender).cancelClaim(1n);
+      expect((await ethers.provider.getBalance(sender.address)) > before).to.equal(true);
+      expect((await claimLinks.getClaim(1n)).status).to.equal(STATUS_CANCELLED);
+    });
+
+    it("reverts on double cancel", async function () {
+      const { sender, receiver, rif, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 100n;
+
+      await rif.connect(sender).approve(await claimLinks.getAddress(), amount);
+      await claimLinks.connect(sender).createClaim(receiver.address, await rif.getAddress(), amount, expiry);
+      await time.increaseTo(expiry + 1n);
+      await claimLinks.connect(sender).cancelClaim(1n);
+
+      await expect(
+        claimLinks.connect(sender).cancelClaim(1n)
+      ).to.be.revertedWithCustomError(claimLinks, "NotOpen");
+    });
+
+    it("reverts if called before expiry", async function () {
+      const { sender, receiver, rif, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 3600n;
+
+      await rif.connect(sender).approve(await claimLinks.getAddress(), amount);
+      await claimLinks.connect(sender).createClaim(receiver.address, await rif.getAddress(), amount, expiry);
+
+      await expect(
+        claimLinks.connect(sender).cancelClaim(1n)
+      ).to.be.revertedWithCustomError(claimLinks, "NotExpired");
+    });
+
+    it("reverts if called by non-sender", async function () {
+      const { sender, receiver, stranger, rif, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 100n;
+
+      await rif.connect(sender).approve(await claimLinks.getAddress(), amount);
+      await claimLinks.connect(sender).createClaim(receiver.address, await rif.getAddress(), amount, expiry);
+      await time.increaseTo(expiry + 1n);
+
+      await expect(
+        claimLinks.connect(stranger).cancelClaim(1n)
+      ).to.be.revertedWithCustomError(claimLinks, "NotSender");
+    });
   });
 
-  it("creates a claim with native coin via createClaimNative (escrows RBTC, tokenIn is zero)", async function () {
-    const { sender, receiver, claimLinks, amount } = await deployFixture();
+  // ─── sweep (FIX 1) ──────────────────────────────────────────────────────────
 
-    const latest = await time.latest();
-    const expiry = BigInt(latest) + 3600n;
+  describe("sweep", function () {
+    it("allows owner to sweep ERC20 tokens", async function () {
+      const { deployer, rif, claimLinks, amount } = await deployFixture();
+      await rif.mint(await claimLinks.getAddress(), amount);
 
-    const addr = await claimLinks.getAddress();
+      const before = await rif.balanceOf(deployer.address);
+      await claimLinks.connect(deployer).sweep(await rif.getAddress(), amount);
+      expect((await rif.balanceOf(deployer.address)) - before).to.equal(amount);
+    });
 
-    await claimLinks.connect(sender).createClaimNative(receiver.address, expiry, { value: amount });
+    it("allows owner to sweep native RBTC", async function () {
+      const { deployer, sender, claimLinks, amount } = await deployFixture();
+      await sender.sendTransaction({ to: await claimLinks.getAddress(), value: amount });
 
-    expect(await ethers.provider.getBalance(addr)).to.equal(amount);
+      const before = await ethers.provider.getBalance(deployer.address);
+      await claimLinks.connect(deployer).sweep(ethers.ZeroAddress, amount);
+      expect((await ethers.provider.getBalance(deployer.address)) > before).to.equal(true);
+    });
 
-    const c = await claimLinks.getClaim(1n);
-    expect(c.tokenIn).to.equal(ethers.ZeroAddress);
-    expect(c.amountIn).to.equal(amount);
+    it("reverts if called by non-owner", async function () {
+      const { stranger, rif, claimLinks, amount } = await deployFixture();
+      await rif.mint(await claimLinks.getAddress(), amount);
+      await expect(
+        claimLinks.connect(stranger).sweep(await rif.getAddress(), amount)
+      ).to.be.revertedWithCustomError(claimLinks, "NotOwner");
+    });
   });
 
-  it("after expiry: cancelClaim refunds native escrow to sender", async function () {
-    const { sender, receiver, claimLinks, amount } = await deployFixture();
-    const addr = await claimLinks.getAddress();
+  // ─── pause / unpause (FIX 6) ────────────────────────────────────────────────
 
-    const latest = await time.latest();
-    const expiry = BigInt(latest) + 100n;
+  describe("pause / unpause", function () {
+    it("owner can pause and unpause", async function () {
+      const { deployer, claimLinks } = await deployFixture();
+      await claimLinks.connect(deployer).pause();
+      await claimLinks.connect(deployer).unpause();
+    });
 
-    await claimLinks.connect(sender).createClaimNative(receiver.address, expiry, { value: amount });
+    it("reverts pause if called by non-owner", async function () {
+      const { stranger, claimLinks } = await deployFixture();
+      await expect(
+        claimLinks.connect(stranger).pause()
+      ).to.be.revertedWithCustomError(claimLinks, "NotOwner");
+    });
 
-    await time.increaseTo(expiry + 1n);
-
-    const before = await ethers.provider.getBalance(sender.address);
-    await claimLinks.connect(sender).cancelClaim(1n);
-
-    expect(await ethers.provider.getBalance(addr)).to.equal(0n);
-    expect((await claimLinks.getClaim(1n)).status).to.equal(STATUS_CANCELLED);
-
-    const after = await ethers.provider.getBalance(sender.address);
-    if (!(after > before)) {
-      throw new Error("expected sender balance to increase after native refund (net of gas)");
-    }
-    if (!(after <= before + amount)) {
-      throw new Error("expected refund not to exceed escrowed amount (gas deducted)");
-    }
+    it("createClaimNative reverts when paused", async function () {
+      const { deployer, sender, receiver, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 3600n;
+      await claimLinks.connect(deployer).pause();
+      await expect(
+        claimLinks.connect(sender).createClaimNative(receiver.address, expiry, { value: amount })
+      ).to.be.revertedWithCustomError(claimLinks, "EnforcedPause");
+    });
   });
 });

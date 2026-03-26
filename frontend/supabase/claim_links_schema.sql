@@ -12,11 +12,16 @@ create table if not exists public.claim_links (
   expiry_ts text not null,
   created_tx_hash text,
   executed_tx_hash text,
+  cancelled_tx_hash text,
   executed_by text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   primary key (claim_id, chain_id)
 );
+
+-- If the table already exists from a previous deployment, ensure the column exists too.
+alter table public.claim_links
+  add column if not exists cancelled_tx_hash text;
 
 create index if not exists claim_links_sender_idx on public.claim_links (sender);
 create index if not exists claim_links_receiver_idx on public.claim_links (receiver);
