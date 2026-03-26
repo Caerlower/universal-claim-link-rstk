@@ -9,3 +9,4 @@ coverage.json
 frontend/.env
 frontend/.env.*
 deployments/deployment-*.json
+.vercel
