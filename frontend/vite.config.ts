@@ -1,10 +1,9 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react-swc";
 import path from "path";
-import { nodePolyfills } from "vite-plugin-node-polyfills";
 
 // https://vitejs.dev/config/
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   server: {
     host: "::",
     port: 8080,
@@ -12,12 +11,11 @@ export default defineConfig({
       overlay: false,
     },
   },
-  plugins: [react(), nodePolyfills()],
+  plugins: [react()],
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
     },
-    // Para + app both use TanStack Query; duplicate copies break useQueryClient.
-    dedupe: ["@tanstack/react-query", "viem", "react", "react-dom"],
+    dedupe: ["react", "react-dom", "react/jsx-runtime", "react/jsx-dev-runtime"],
   },
-});
+}));

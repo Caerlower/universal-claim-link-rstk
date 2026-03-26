@@ -1,119 +1,147 @@
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap");
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 @layer base {
+  /* Dark mode default (matches original frontend screenshot) */
   :root {
-    --background: 220 15% 5%;
-    --foreground: 0 0% 95%;
+    --background: 220 14% 7%;
+    --foreground: 40 24% 97%;
 
-    --card: 220 15% 8%;
-    --card-foreground: 0 0% 95%;
+    --card: 220 12% 11%;
+    --card-foreground: 40 22% 96%;
 
-    --popover: 220 15% 10%;
-    --popover-foreground: 0 0% 95%;
+    --popover: 220 12% 11%;
+    --popover-foreground: 40 22% 96%;
 
-    --primary: 32 94% 53%;
-    --primary-foreground: 0 0% 100%;
+    --primary: 24 90% 55%;
+    --primary-foreground: 220 14% 6%;
 
-    --secondary: 220 15% 14%;
-    --secondary-foreground: 0 0% 85%;
+    --secondary: 220 10% 16%;
+    --secondary-foreground: 40 14% 86%;
 
-    --muted: 220 12% 12%;
-    --muted-foreground: 220 10% 55%;
+    --muted: 220 10% 15%;
+    --muted-foreground: 220 10% 72%;
 
-    --accent: 32 94% 53%;
-    --accent-foreground: 0 0% 100%;
+    --accent: 24 90% 55%;
+    --accent-foreground: 220 14% 6%;
 
     --destructive: 0 72% 51%;
-    --destructive-foreground: 0 0% 100%;
+    --destructive-foreground: 40 20% 95%;
 
-    --border: 220 12% 16%;
-    --input: 220 12% 16%;
-    --ring: 32 94% 53%;
+    --border: 220 10% 24%;
+    --input: 220 10% 18%;
+    --ring: 24 90% 55%;
 
     --radius: 1rem;
 
-    --success: 142 71% 45%;
-    --success-foreground: 0 0% 100%;
+    --glass: 220 12% 12%;
+    --glass-border: 220 10% 24%;
+    --glow-primary: 24 90% 55%;
 
-    --glass-bg: 220 15% 10%;
-    --glass-border: 220 12% 20%;
-    --glow-orange: 32 94% 53%;
+    --sidebar-background: 220 12% 10%;
+    --sidebar-foreground: 40 12% 84%;
+    --sidebar-primary: 24 90% 55%;
+    --sidebar-primary-foreground: 220 14% 6%;
+    --sidebar-accent: 220 10% 16%;
+    --sidebar-accent-foreground: 40 20% 95%;
+    --sidebar-border: 220 10% 24%;
+    --sidebar-ring: 24 90% 55%;
+  }
+
+  /* Light mode palette for theme toggle */
+  .light {
+    --background: 40 20% 98%;
+    --foreground: 220 14% 8%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 220 14% 8%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 14% 8%;
+
+    --primary: 24 90% 52%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 220 12% 94%;
+    --secondary-foreground: 220 10% 25%;
+
+    --muted: 220 10% 95%;
+    --muted-foreground: 220 8% 45%;
+
+    --accent: 24 90% 52%;
+    --accent-foreground: 0 0% 100%;
+
+    --border: 220 12% 86%;
+    --input: 220 12% 90%;
+    --ring: 24 90% 52%;
+
+    --glass: 0 0% 100%;
+    --glass-border: 220 12% 84%;
+
+    --sidebar-background: 0 0% 100%;
+    --sidebar-foreground: 220 10% 35%;
+    --sidebar-primary: 24 90% 52%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 220 12% 94%;
+    --sidebar-accent-foreground: 220 14% 8%;
+    --sidebar-border: 220 12% 86%;
+    --sidebar-ring: 24 90% 52%;
   }
 }
 
 @layer base {
+  html {
+    font-size: 17px;
+  }
+
   * {
     @apply border-border;
   }
 
   body {
-    @apply bg-background text-foreground font-sans antialiased;
-    font-family: 'Inter', system-ui, sans-serif;
-  }
-}
-
-@layer components {
-  .glass-card {
-    @apply relative overflow-hidden rounded-2xl border border-border/50;
-    background: linear-gradient(
-      135deg,
-      hsl(var(--glass-bg) / 0.8),
-      hsl(var(--glass-bg) / 0.4)
-    );
-    backdrop-filter: blur(24px);
-    box-shadow:
-      0 0 0 1px hsl(var(--glass-border) / 0.3),
-      0 8px 32px -8px hsl(0 0% 0% / 0.5),
-      inset 0 1px 0 0 hsl(0 0% 100% / 0.04);
-  }
-
-  .glass-card-hover {
-    @apply glass-card transition-all duration-300;
-  }
-  .glass-card-hover:hover {
-    box-shadow:
-      0 0 0 1px hsl(var(--glow-orange) / 0.2),
-      0 12px 40px -8px hsl(0 0% 0% / 0.6),
-      0 0 60px -20px hsl(var(--glow-orange) / 0.15),
-      inset 0 1px 0 0 hsl(0 0% 100% / 0.06);
-    border-color: hsl(var(--glow-orange) / 0.3);
-  }
-
-  .glow-orange {
-    box-shadow: 0 0 40px -10px hsl(var(--glow-orange) / 0.4);
-  }
-
-  .glow-success {
-    box-shadow: 0 0 40px -10px hsl(var(--success) / 0.4);
-  }
-
-  .btn-primary-glow {
-    @apply relative overflow-hidden;
-    box-shadow: 0 0 20px -4px hsl(var(--primary) / 0.4);
-  }
-  .btn-primary-glow:hover {
-    box-shadow: 0 0 30px -4px hsl(var(--primary) / 0.6);
-  }
-
-  .text-gradient-orange {
-    @apply bg-clip-text text-transparent;
-    background-image: linear-gradient(135deg, hsl(32 94% 53%), hsl(28 94% 63%));
-  }
-
-  .bg-grid-pattern {
-    background-image:
-      linear-gradient(hsl(var(--border) / 0.3) 1px, transparent 1px),
-      linear-gradient(90deg, hsl(var(--border) / 0.3) 1px, transparent 1px);
-    background-size: 60px 60px;
+    @apply bg-background text-foreground antialiased;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
   }
 }
 
 @layer utilities {
-  .text-balance {
-    text-wrap: balance;
+  .glass {
+    @apply bg-card/60 backdrop-blur-xl border border-glass-border;
+  }
+
+  .glass-strong {
+    @apply bg-card/80 backdrop-blur-2xl border border-glass-border;
+  }
+
+  .glow-orange {
+    box-shadow: 0 0 60px -12px hsl(var(--primary) / 0.3);
+  }
+
+  .glow-orange-sm {
+    box-shadow: 0 0 30px -8px hsl(var(--primary) / 0.2);
+  }
+
+  .text-gradient {
+    @apply bg-clip-text text-transparent bg-gradient-to-r from-foreground to-foreground/80;
+  }
+
+  .text-gradient-orange {
+    @apply bg-clip-text text-transparent bg-gradient-to-r from-primary to-orange-300;
+  }
+
+  .shadow-premium {
+    box-shadow: 0 8px 32px -8px rgba(0,0,0,0.5), 0 2px 8px -2px rgba(0,0,0,0.3);
+  }
+
+  .shadow-card {
+    box-shadow: 0 4px 24px -4px rgba(0,0,0,0.3), 0 1px 4px -1px rgba(0,0,0,0.2);
+  }
+
+  .tracking-label {
+    @apply text-xs font-semibold uppercase tracking-[0.1em] text-muted-foreground;
   }
 }

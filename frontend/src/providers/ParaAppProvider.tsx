@@ -1,7 +1,8 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ParaProvider } from "@getpara/react-sdk";
+import { Environment, ParaProvider } from "@getpara/react-sdk";
 import { rootstockTestnet } from "viem/chains";
 import "@getpara/react-sdk/styles.css";
+import { useTheme } from "@/providers/ThemeProvider";
 
 const queryClient = new QueryClient();
 
@@ -31,30 +32,44 @@ type ParaAppProviderProps = {
 export function ParaAppProvider({ children }: ParaAppProviderProps) {
   const apiKey = import.meta.env.VITE_PARA_API_KEY ?? "";
   const paraEnv = import.meta.env.VITE_PARA_ENV;
-  const walletConnectProjectId = import.meta.env.VITE_WALLETCONNECT_PROJECT_ID ?? "";
+  const walletConnectProjectId = import.meta.env.VITE_WALLETCONNECT_PROJECT_ID?.trim();
+  // Theme is used for the app UI; Para modal is intentionally kept in the clean light style.
+  useTheme();
+  const appName = "RootClaim";
+
+  // Enable WalletConnect only when a project id is provided in env.
+  const wallets = walletConnectProjectId
+    ? (["METAMASK", "PHANTOM", "WALLETCONNECT"] as const)
+    : (["METAMASK", "PHANTOM"] as const);
+
+  const env =
+    paraEnv?.toUpperCase() === "PROD" ? Environment.PROD : Environment.BETA;
 
   return (
     <QueryClientProvider client={queryClient}>
       <ParaProvider
         paraClientConfig={{
+          env,
           apiKey,
-          ...(paraEnv ? { env: paraEnv } : {}),
         }}
         externalWalletConfig={{
-          wallets: ["METAMASK", "WALLETCONNECT"],
+          appName,
+          wallets,
+          ...(walletConnectProjectId
+            ? {
+                walletConnect: {
+                  projectId: walletConnectProjectId,
+                },
+              }
+            : {}),
           includeWalletVerification: true,
           evmConnector: {
             config: {
               chains: evmChains,
             },
           },
-          walletConnect: {
-            projectId: walletConnectProjectId,
-          },
         }}
-        config={{
-          appName: "Universal Claim Links",
-        }}
+        config={{ appName }}
         paraModalConfig={{
           balances: {
             displayType: "AGGREGATED",
@@ -92,20 +107,23 @@ export function ParaAppProvider({ children }: ParaAppProviderProps) {
           disableEmailLogin: false,
           disablePhoneLogin: false,
           authLayout: ["AUTH:FULL", "EXTERNAL:FULL"],
-          oAuthMethods: ["GOOGLE"],
+          oAuthMethods: ["GOOGLE", "TWITTER", "TELEGRAM"],
           onRampTestMode: true,
           theme: {
-            foregroundColor: "#222222",
+            // Match Para's clean light aesthetic (rounded, soft neutrals) like the reference screenshot.
+            foregroundColor: "#111111",
             backgroundColor: "#FFFFFF",
-            accentColor: "#888888",
-            darkForegroundColor: "#EEEEEE",
-            darkBackgroundColor: "#111111",
-            darkAccentColor: "#AAAAAA",
+            accentColor: "#111111",
+            // Dark fields kept for completeness, but we force `mode: "light"` below.
+            darkForegroundColor: "#FFFFFF",
+            darkBackgroundColor: "#0B0B0B",
+            darkAccentColor: "#FFFFFF",
+            // Keep Para modal in the clean light aesthetic (like the reference screenshot).
             mode: "light",
-            borderRadius: "none",
-            font: "Inter",
+            borderRadius: "large",
+            font: "SF Pro Display",
           },
-          logo: "/para.svg",
+          logo: "/download.svg",
           recoverySecretStepEnabled: true,
           twoFactorAuthEnabled: false,
         }}

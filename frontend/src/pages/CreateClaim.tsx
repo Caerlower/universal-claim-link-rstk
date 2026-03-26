@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { Link2, Copy, Check, ArrowRight, Clock } from "lucide-react";
-import { useAccount } from "@getpara/react-sdk";
 import { readContract, simulateContract, writeContract, waitForTransactionReceipt } from "viem/actions";
 import { isAddress, maxUint256, parseUnits } from "viem";
 import { toast } from "sonner";
@@ -11,7 +10,7 @@ import { erc20Abi } from "@/lib/contracts/erc20Abi";
 import { getClaimLinksEnv, tokenAddressForSymbol, type SupportedSymbol } from "@/lib/contracts/contractConfig";
 import { parseClaimIdFromReceipt } from "@/lib/contracts/parseClaimCreated";
 import { useParaViem } from "@/hooks/useParaViem";
-import { getAppChain, getPublicClient } from "@/lib/viem/appChain";
+import { getAppChain, getPublicClient, getRpcUrl } from "@/lib/viem/appChain";
 import {
   assertCreateClaimPreflight,
   assertSufficientNativeBalance,
@@ -26,8 +25,8 @@ type FlowState = "form" | "loading" | "success";
 
 const CreateClaim = () => {
   const env = getClaimLinksEnv();
-  const { isConnected } = useAccount();
   const { address, viemClient, ready, isExternalEvm, hasInjectedProvider } = useParaViem();
+  const isConnected = !!address;
 
   const [state, setState] = useState<FlowState>("form");
   const [receiver, setReceiver] = useState("");
@@ -44,7 +43,7 @@ const CreateClaim = () => {
   const handleCreate = async () => {
     if (!env) {
       toast.error("Contract env missing", {
-        description: "Set VITE_UNIVERSAL_CLAIM_LINKS_ADDRESS and token addresses in frontend/.env",
+        description: "Set VITE_UNIVERSAL_CLAIM_LINKS_ADDRESS (and RIF / USDRIF if not using chain 31 defaults) in frontend/.env",
       });
       return;
     }
@@ -84,6 +83,7 @@ const CreateClaim = () => {
 
       let amountWei: bigint;
       let decimals: number;
+      let didApprove = false;
 
       if (useNativeRbtc) {
         decimals = 18;
@@ -122,23 +122,29 @@ const CreateClaim = () => {
           decimals,
         });
 
-        const hashApprove = await writeContract(writeClient as never, {
-          chain,
+        // Speed: only approve if needed.
+        const allowance = await readContract(publicClient as never, {
           address: tokenIn,
           abi: erc20Abi,
-          functionName: "approve",
-          args: [env.claimLinks, maxUint256],
+          functionName: "allowance",
+          args: [address, env.claimLinks],
         } as never);
-        const receiptApprove = await waitForTransactionReceipt(writeClient, { hash: hashApprove });
-        if (receiptApprove.status !== "success") throw new Error("Approve failed");
+        if (allowance < amountWei) {
+          const hashApprove = await writeContract(writeClient as never, {
+            chain,
+            address: tokenIn,
+            abi: erc20Abi,
+            functionName: "approve",
+            args: [env.claimLinks, maxUint256],
+          } as never);
+          const receiptApprove = await waitForTransactionReceipt(writeClient, { hash: hashApprove });
+          if (receiptApprove.status !== "success") throw new Error("Approve failed");
+          didApprove = true;
 
-        /** Public nodes often lag; `eth_call` simulation still sees allowance 0 and reverts. */
-        await waitForAllowanceVisible(publicClient, {
-          token: tokenIn,
-          owner: address,
-          spender: env.claimLinks,
-          atLeast: amountWei,
-        });
+          // Don't block here on fast RPCs. We'll retry the create once if the node still
+          // doesn't see the allowance immediately (common on laggy public nodes).
+        }
+
       }
 
       /** Contract checks `expiry > block.timestamp`. Use chain time, not `Date.now()`, or RSK can revert `InvalidExpiry`. */
@@ -152,39 +158,65 @@ const CreateClaim = () => {
 
       let hashCreate: `0x${string}`;
       if (useNativeRbtc) {
-        await simulateContract(publicClient as never, {
-          address: env.claimLinks,
-          abi: universalClaimLinksAbi,
-          functionName: "createClaimNative",
-          args: [receiver as `0x${string}`, expiryTs],
-          account: address,
-          value: amountWei,
-        } as never);
-
-        hashCreate = await writeContract(writeClient as never, {
-          chain,
-          address: env.claimLinks,
-          abi: universalClaimLinksAbi,
-          functionName: "createClaimNative",
-          args: [receiver as `0x${string}`, expiryTs],
-          value: amountWei,
-        } as never);
+        try {
+          hashCreate = await writeContract(writeClient as never, {
+            chain,
+            address: env.claimLinks,
+            abi: universalClaimLinksAbi,
+            functionName: "createClaimNative",
+            args: [receiver as `0x${string}`, expiryTs],
+            value: amountWei,
+          } as never);
+        } catch (e) {
+          // Fallback: simulation to get a readable revert reason.
+          await simulateContract(publicClient as never, {
+            address: env.claimLinks,
+            abi: universalClaimLinksAbi,
+            functionName: "createClaimNative",
+            args: [receiver as `0x${string}`, expiryTs],
+            account: address,
+            value: amountWei,
+          } as never);
+          throw e;
+        }
       } else {
-        await simulateContract(publicClient as never, {
-          address: env.claimLinks,
-          abi: universalClaimLinksAbi,
-          functionName: "createClaim",
-          args: [receiver as `0x${string}`, tokenIn, amountWei, expiryTs],
-          account: address,
-        } as never);
-
-        hashCreate = await writeContract(writeClient as never, {
-          chain,
-          address: env.claimLinks,
-          abi: universalClaimLinksAbi,
-          functionName: "createClaim",
-          args: [receiver as `0x${string}`, tokenIn, amountWei, expiryTs],
-        } as never);
+        const createArgs = [receiver as `0x${string}`, tokenIn, amountWei, expiryTs] as const;
+        try {
+          hashCreate = await writeContract(writeClient as never, {
+            chain,
+            address: env.claimLinks,
+            abi: universalClaimLinksAbi,
+            functionName: "createClaim",
+            args: createArgs,
+          } as never);
+        } catch (e) {
+          // If we just approved, some RPCs still don't see the allowance. Wait briefly then retry once.
+          if (didApprove) {
+            const rpc = getRpcUrl();
+            const isPublic = /public-node\.testnet\.rsk\.co|public-node\.rsk\.co/i.test(rpc);
+            await waitForAllowanceVisible(
+              publicClient,
+              { token: tokenIn, owner: address, spender: env.claimLinks, atLeast: amountWei },
+              isPublic ? undefined : { maxAttempts: 6, delayMs: 250 },
+            );
+            hashCreate = await writeContract(writeClient as never, {
+              chain,
+              address: env.claimLinks,
+              abi: universalClaimLinksAbi,
+              functionName: "createClaim",
+              args: createArgs,
+            } as never);
+          } else {
+            await simulateContract(publicClient as never, {
+              address: env.claimLinks,
+              abi: universalClaimLinksAbi,
+              functionName: "createClaim",
+              args: createArgs,
+              account: address,
+            } as never);
+            throw e;
+          }
+        }
       }
       setLastTxHash(hashCreate);
       const receiptCreate = await waitForTransactionReceipt(writeClient, { hash: hashCreate });
@@ -229,8 +261,9 @@ const CreateClaim = () => {
           <p>
             Deploy <strong>UniversalClaimLinks</strong> to Rootstock testnet from the repo root, then set{" "}
             <code className="text-primary">VITE_UNIVERSAL_CLAIM_LINKS_ADDRESS</code> in{" "}
-            <code className="text-primary">frontend/.env</code> to the printed contract address. Canonical WRBTC / tRIF /
-            USDRIF are filled automatically when <code className="text-primary">VITE_CHAIN_ID=31</code>.
+            <code className="text-primary">frontend/.env</code> to the printed contract address. Canonical tRIF / USDRIF
+            are filled automatically when <code className="text-primary">VITE_CHAIN_ID=31</code> (native RBTC claims need no
+            token address).
           </p>
           <pre className="text-xs bg-secondary/80 p-3 rounded-lg overflow-x-auto whitespace-pre-wrap">
             npm run compile{"\n"}

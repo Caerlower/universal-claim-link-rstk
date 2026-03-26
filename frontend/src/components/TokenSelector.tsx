@@ -4,24 +4,36 @@ import { ChevronDown } from "lucide-react";
 interface Token {
   symbol: string;
   name: string;
-  icon: string;
+  logoUrl: string;
 }
 
 const TOKENS: Token[] = [
-  { symbol: "RBTC", name: "Rootstock BTC", icon: "₿" },
-  { symbol: "RIF", name: "RIF Token", icon: "◆" },
-  { symbol: "USDRIF", name: "USD RIF", icon: "$" },
+  {
+    symbol: "RBTC",
+    name: "Rootstock BTC",
+    logoUrl:
+      "https://raw.githubusercontent.com/rsksmart/rsk-contract-metadata/refs/heads/master/images/rootstock-orange.png",
+  },
+  {
+    symbol: "RIF",
+    name: "RIF Token",
+    logoUrl: "https://raw.githubusercontent.com/rsksmart/rsk-contract-metadata/refs/heads/master/images/rif.png",
+  },
+  { symbol: "USDRIF", name: "USD on RIF", logoUrl: "/usdrif.svg" },
 ];
 
 interface TokenSelectorProps {
   value: string;
   onChange: (symbol: string) => void;
   label?: string;
+  /** If set, only these symbols are listed (must match `TOKENS.symbol`). */
+  symbols?: string[];
 }
 
-const TokenSelector = ({ value, onChange, label }: TokenSelectorProps) => {
+const TokenSelector = ({ value, onChange, label, symbols }: TokenSelectorProps) => {
   const [open, setOpen] = useState(false);
-  const selected = TOKENS.find((t) => t.symbol === value) || TOKENS[0];
+  const list = symbols?.length ? TOKENS.filter((t) => symbols.includes(t.symbol)) : TOKENS;
+  const selected = list.find((t) => t.symbol === value) || list[0] || TOKENS[0];
 
   return (
     <div className="relative">
@@ -32,8 +44,8 @@ const TokenSelector = ({ value, onChange, label }: TokenSelectorProps) => {
         className="flex w-full items-center justify-between gap-3 px-4 py-3 rounded-xl bg-secondary/60 border border-border/50 text-foreground transition-all duration-200 hover:border-primary/30 focus:outline-none focus:ring-2 focus:ring-ring/30 active:scale-[0.98]"
       >
         <div className="flex items-center gap-3">
-          <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/15 text-primary text-sm font-bold">
-            {selected.icon}
+          <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-muted/40 border border-border/60 overflow-hidden">
+            <img src={selected.logoUrl} alt={selected.symbol} className="h-6 w-6 object-contain" />
           </span>
           <div className="text-left">
             <div className="text-sm font-semibold">{selected.symbol}</div>
@@ -45,7 +57,7 @@ const TokenSelector = ({ value, onChange, label }: TokenSelectorProps) => {
 
       {open && (
         <div className="absolute z-50 left-0 right-0 top-full mt-2 glass-card p-1.5 animate-scale-in">
-          {TOKENS.map((token) => (
+          {list.map((token) => (
             <button
               key={token.symbol}
               type="button"
@@ -56,8 +68,8 @@ const TokenSelector = ({ value, onChange, label }: TokenSelectorProps) => {
                   : "text-foreground hover:bg-secondary/60"
               }`}
             >
-              <span className="flex h-7 w-7 items-center justify-center rounded-md bg-primary/15 text-primary text-xs font-bold">
-                {token.icon}
+              <span className="flex h-7 w-7 items-center justify-center rounded-md bg-muted/40 border border-border/60 overflow-hidden">
+                <img src={token.logoUrl} alt={token.symbol} className="h-5 w-5 object-contain" />
               </span>
               <div className="text-left">
                 <div className="text-sm font-medium">{token.symbol}</div>

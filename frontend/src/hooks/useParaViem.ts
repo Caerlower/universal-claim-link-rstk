@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { createWalletClient, custom, http, type EIP1193Provider, type WalletClient } from "viem";
 import { useViemClient } from "@getpara/react-sdk/evm";
-import { useClient, useWallet } from "@getpara/react-sdk";
+import { useAccount, useClient, useWallet } from "@getpara/react-sdk";
 import { getAppChain, getRpcUrl } from "@/lib/viem/appChain";
 import { eip1193WithEthChainIdFallback } from "@/lib/viem/eip1193ChainIdFallback";
 import {
@@ -32,8 +32,25 @@ export type ParaViem = {
  */
 export function useParaViem(): ParaViem {
   const para = useClient();
+  const { isConnected } = useAccount();
   const { data: wallet } = useWallet();
-  const address = wallet?.address as `0x${string}` | undefined;
+  const rawAddress = wallet?.address as `0x${string}` | undefined;
+  const [stableAddress, setStableAddress] = useState<`0x${string}` | undefined>(rawAddress);
+
+  useEffect(() => {
+    if (rawAddress) {
+      setStableAddress(rawAddress);
+      return;
+    }
+    // Para can briefly clear wallet data during connect/session refresh.
+    // Keep the last known address for a short grace period to avoid false disconnect UX.
+    const timer = setTimeout(() => {
+      if (!isConnected) setStableAddress(undefined);
+    }, 6000);
+    return () => clearTimeout(timer);
+  }, [rawAddress, isConnected]);
+
+  const address = stableAddress;
 
   const chain = getAppChain();
   const { viemClient: paraEmbeddedClient, isLoading } = useViemClient({

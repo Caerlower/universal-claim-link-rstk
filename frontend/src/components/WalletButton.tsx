@@ -1,27 +1,62 @@
-import { useState } from "react";
-import { useModal, useAccount, useWallet, useLogout } from "@getpara/react-sdk";
+import { useEffect, useMemo, useState } from "react";
+import { useModal, useLogout } from "@getpara/react-sdk";
 import { Wallet, ChevronDown, LogOut, Copy, ExternalLink } from "lucide-react";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { useParaViem } from "@/hooks/useParaViem";
 
 const WalletButton = () => {
   const { openModal } = useModal();
-  const { isConnected, isLoading } = useAccount();
-  const { data: wallet } = useWallet();
+  const { address: stableAddress, isViemLoading } = useParaViem();
   const { logout } = useLogout();
-  const [showDropdown, setShowDropdown] = useState(false);
+  const [isOpening, setIsOpening] = useState(false);
+  const [displayAddress, setDisplayAddress] = useState("");
+  const [disconnectRequested, setDisconnectRequested] = useState(false);
 
-  const address = wallet?.address ?? "";
+  const address = stableAddress ?? "";
+  // Para wallet state can briefly flicker after connect; keep last known address for a short window.
+  useEffect(() => {
+    if (address) {
+      setDisplayAddress(address);
+      setDisconnectRequested(false);
+      return;
+    }
+    if (disconnectRequested) {
+      setDisplayAddress("");
+      return;
+    }
+    const timer = setTimeout(() => setDisplayAddress(""), 1500);
+    return () => clearTimeout(timer);
+  }, [address, disconnectRequested]);
+
+  const connected = useMemo(() => !!displayAddress, [displayAddress]);
   const short =
-    address.length > 10 ? `${address.slice(0, 6)}...${address.slice(-4)}` : address || "Connected";
+    displayAddress.length > 10 ? `${displayAddress.slice(0, 6)}...${displayAddress.slice(-4)}` : displayAddress || "Connected";
 
   const explorerBase =
     import.meta.env.VITE_RSK_EXPLORER_URL?.replace(/\/$/, "") ?? "https://explorer.testnet.rootstock.io";
 
-  const handleDisconnect = () => {
-    logout();
-    setShowDropdown(false);
+  const handleDisconnect = async () => {
+    setDisconnectRequested(true);
+    try {
+      await logout();
+    } catch {
+      // If the SDK throws, fallback to letting the user retry.
+      setDisconnectRequested(false);
+    }
   };
 
-  if (isLoading) {
+  const handleConnect = async () => {
+    if (isOpening) return;
+    setIsOpening(true);
+    try {
+      await Promise.resolve(openModal());
+    } finally {
+      // Keep short guard to avoid accidental double-open.
+      setTimeout(() => setIsOpening(false), 300);
+    }
+  };
+
+  if (isViemLoading && !connected) {
     return (
       <button
         type="button"
@@ -34,62 +69,75 @@ const WalletButton = () => {
     );
   }
 
-  if (isConnected) {
+  if (connected) {
     return (
-      <div className="relative">
-        <button
-          type="button"
-          onClick={() => setShowDropdown(!showDropdown)}
-          className="flex items-center gap-2 px-4 py-2 rounded-xl bg-secondary border border-border/60 text-sm font-medium text-foreground transition-all duration-200 hover:border-primary/40 active:scale-[0.97]"
-        >
-          <div className="h-2 w-2 rounded-full bg-success animate-pulse-glow" />
-          <span>{short}</span>
-          <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
-        </button>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-secondary border border-border/60 text-sm font-medium text-foreground transition-all duration-200 hover:border-primary/40 active:scale-[0.97]"
+          >
+            <div className="h-2 w-2 rounded-full bg-success animate-pulse-glow" />
+            <span>{short}</span>
+            <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+          </button>
+        </DropdownMenuTrigger>
 
-        {showDropdown && (
-          <div className="absolute right-0 top-full mt-2 w-56 glass-card p-2 animate-scale-in z-50">
-            <button
-              type="button"
-              disabled={!address}
-              onClick={() => address && void navigator.clipboard.writeText(address)}
-              className="flex w-full items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-foreground hover:bg-secondary/60 transition-colors disabled:opacity-50"
-            >
-              <Copy className="h-4 w-4 text-muted-foreground" />
-              Copy Address
-            </button>
+        <DropdownMenuContent
+          align="end"
+          sideOffset={10}
+          className="w-60 glass-card p-2 border border-glass-border/70 shadow-2xl"
+        >
+          <DropdownMenuItem
+            disabled={!address}
+            onSelect={(e) => {
+              e.preventDefault();
+              if (!displayAddress) return;
+              void navigator.clipboard.writeText(displayAddress);
+            }}
+            className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm"
+          >
+            <Copy className="h-4 w-4 text-muted-foreground" />
+            Copy Address
+          </DropdownMenuItem>
+
+          <DropdownMenuItem asChild className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm">
             <a
-              href={address ? `${explorerBase}/address/${address}` : explorerBase}
+              href={displayAddress ? `${explorerBase}/address/${displayAddress}` : explorerBase}
               target="_blank"
               rel="noopener noreferrer"
-              className="flex w-full items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-foreground hover:bg-secondary/60 transition-colors"
             >
               <ExternalLink className="h-4 w-4 text-muted-foreground" />
               View on Explorer
             </a>
-            <div className="my-1 border-t border-border/40" />
-            <button
-              type="button"
-              onClick={handleDisconnect}
-              className="flex w-full items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-destructive hover:bg-destructive/10 transition-colors"
-            >
-              <LogOut className="h-4 w-4" />
-              Log out
-            </button>
-          </div>
-        )}
-      </div>
+          </DropdownMenuItem>
+
+          <DropdownMenuSeparator className="my-1 bg-border/40" />
+
+          <DropdownMenuItem
+            onSelect={(e) => {
+              e.preventDefault();
+              void handleDisconnect();
+            }}
+            className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-destructive focus:text-destructive"
+          >
+            <LogOut className="h-4 w-4" />
+            Log out
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
     );
   }
 
   return (
     <button
       type="button"
-      onClick={() => openModal()}
+      onClick={() => void handleConnect()}
+      disabled={isOpening}
       className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-semibold btn-primary-glow transition-all duration-200 hover:brightness-110 active:scale-[0.97]"
     >
       <Wallet className="h-4 w-4" />
-      Connect with Para
+      {isOpening ? "Connecting…" : "Connect"}
     </button>
   );
 };
