@@ -11,9 +11,10 @@ interface ImportMetaEnv {
   /** Rootstock explorer base URL, no trailing slash (WalletButton default: testnet) */
   readonly VITE_RSK_EXPLORER_URL?: string;
   readonly VITE_UNIVERSAL_CLAIM_LINKS_ADDRESS?: string;
-  readonly VITE_TOKEN_WRBTC?: string;
   readonly VITE_TOKEN_RIF?: string;
   readonly VITE_TOKEN_USDRIF?: string;
+  readonly VITE_SUPABASE_URL?: string;
+  readonly VITE_SUPABASE_ANON_KEY?: string;
 }
 
 interface ImportMeta {

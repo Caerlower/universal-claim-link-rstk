@@ -2,11 +2,9 @@ import { useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowDown, ArrowRight, Wallet, RefreshCw } from "lucide-react";
-import { useAccount } from "@getpara/react-sdk";
-import { readContract, writeContract, waitForTransactionReceipt } from "viem/actions";
+import { readContract, simulateContract, writeContract, waitForTransactionReceipt } from "viem/actions";
 import { formatUnits } from "viem";
 import { toast } from "sonner";
-import TokenSelector from "@/components/TokenSelector";
 import StatusIndicator from "@/components/StatusIndicator";
 import universalClaimLinksAbi from "@/lib/contracts/universalClaimLinksAbi.json";
 import {
@@ -17,21 +15,43 @@ import {
 } from "@/lib/contracts/contractConfig";
 import { estimateAmountOut } from "@/lib/contracts/rates";
 import { getAppChain, getPublicClient } from "@/lib/viem/appChain";
-import { formatWriteContractError } from "@/lib/viem/txErrors";
+import { claimRevertedReceiptHint, formatWriteContractError } from "@/lib/viem/txErrors";
 import { useParaViem } from "@/hooks/useParaViem";
+import { isSupabaseConfigured } from "@/lib/supabase/client";
+import { markClaimExecuted } from "@/lib/supabase/claims";
 
 type ViemWriteClient = Parameters<typeof writeContract>[0];
 
 type ClaimState = "details" | "loading" | "success" | "error";
+type ClaimFundsProps = {
+  claimIdOverride?: string;
+  embedded?: boolean;
+};
 
 const STATUS_OPEN = 0;
 
-const ClaimFunds = () => {
-  const { id } = useParams<{ id: string }>();
+const tokenOptions: { symbol: SupportedSymbol; name: string; logoUrl: string }[] = [
+  {
+    symbol: "RBTC",
+    name: "Rootstock BTC",
+    logoUrl:
+      "https://raw.githubusercontent.com/rsksmart/rsk-contract-metadata/refs/heads/master/images/rootstock-orange.png",
+  },
+  {
+    symbol: "RIF",
+    name: "RIF Token",
+    logoUrl: "https://raw.githubusercontent.com/rsksmart/rsk-contract-metadata/refs/heads/master/images/rif.png",
+  },
+  { symbol: "USDRIF", name: "USD on RIF", logoUrl: "/usdrif.svg" },
+];
+
+const ClaimFunds = ({ claimIdOverride, embedded = false }: ClaimFundsProps) => {
+  const { id: routeId } = useParams<{ id: string }>();
+  const id = claimIdOverride ?? routeId;
   const env = getClaimLinksEnv();
   const queryClient = useQueryClient();
-  const { isConnected } = useAccount();
   const { address, viemClient, ready, isExternalEvm, hasInjectedProvider } = useParaViem();
+  const isConnected = !!address;
 
   const [state, setState] = useState<ClaimState>("details");
   const [tokenOut, setTokenOut] = useState<SupportedSymbol>("RBTC");
@@ -70,7 +90,7 @@ const ClaimFunds = () => {
   const tokenOutAddr = env ? tokenAddressForSymbol(env, tokenOut) : undefined;
   const estOut =
     env && claim?.tokenIn && tokenOutAddr
-      ? estimateAmountOut(claim.amountIn, claim.tokenIn, tokenOutAddr, env.wrbtc, env.rif, env.usdrif)
+      ? estimateAmountOut(claim.amountIn, claim.tokenIn, tokenOutAddr, env.rif, env.usdrif)
       : 0n;
   const estOutFmt = formatUnits(estOut, 18);
 
@@ -112,19 +132,51 @@ const ClaimFunds = () => {
 
     try {
       const writeClient = viemClient as unknown as ViemWriteClient;
+      const publicClient = getPublicClient();
 
-      const hash = await writeContract(writeClient, {
-        chain: getAppChain(),
-        address: env.claimLinks,
-        abi: universalClaimLinksAbi,
-        functionName: "executeClaim",
-        args: [claimId, out],
-      });
+      let hash: `0x${string}`;
+      try {
+        hash = await writeContract(writeClient, {
+          chain: getAppChain(),
+          address: env.claimLinks,
+          abi: universalClaimLinksAbi,
+          functionName: "executeClaim",
+          args: [claimId, out],
+        });
+      } catch (e) {
+        // Fallback: simulation to get a readable revert reason.
+        await simulateContract(publicClient as never, {
+          address: env.claimLinks,
+          abi: universalClaimLinksAbi,
+          functionName: "executeClaim",
+          args: [claimId, out],
+          account: address,
+        } as never);
+        throw e;
+      }
       setLastTxHash(hash);
       const receipt = await waitForTransactionReceipt(writeClient, { hash });
-      if (receipt.status !== "success") throw new Error("Claim failed");
+      if (receipt.status !== "success") {
+        throw new Error(claimRevertedReceiptHint(tokenOut));
+      }
       await queryClient.invalidateQueries({ queryKey: ["claim", env.claimLinks, claimId.toString()] });
       await refetch();
+
+      if (isSupabaseConfigured) {
+        try {
+          await markClaimExecuted({
+            claimId: claimId.toString(),
+            chainId: getAppChain().id,
+            tokenOutSymbol: tokenOut,
+            amountOutWei: estOut.toString(),
+            executedBy: address,
+            executedTxHash: hash,
+          });
+        } catch (dbError) {
+          console.error("Supabase update failed:", dbError);
+        }
+      }
+
       setState("success");
       toast.success("Claim completed");
     } catch (e: unknown) {
@@ -137,7 +189,7 @@ const ClaimFunds = () => {
 
   if (!env) {
     return (
-      <div className="min-h-screen pt-24 pb-16 px-4 text-center text-sm text-muted-foreground">
+      <div className={`${embedded ? "pt-2 pb-2 px-0" : "min-h-screen pt-24 pb-16 px-4"} text-center text-sm text-muted-foreground`}>
         Configure <code className="text-primary">VITE_UNIVERSAL_CLAIM_LINKS_ADDRESS</code> and token env vars.
       </div>
     );
@@ -145,7 +197,7 @@ const ClaimFunds = () => {
 
   if (claimId == null) {
     return (
-      <div className="min-h-screen pt-24 pb-16 px-4 text-center text-sm text-muted-foreground max-w-md mx-auto">
+      <div className={`${embedded ? "pt-2 pb-2 px-0" : "min-h-screen pt-24 pb-16 px-4"} text-center text-sm text-muted-foreground max-w-md mx-auto`}>
         Invalid claim link. Use a URL like <code className="text-primary">/claim/1</code> with the numeric claim id from the creator.
       </div>
     );
@@ -153,7 +205,7 @@ const ClaimFunds = () => {
 
   if (claim === undefined) {
     return (
-      <div className="min-h-screen pt-24 pb-16 px-4 text-center text-sm text-muted-foreground">
+      <div className={`${embedded ? "pt-2 pb-2 px-0" : "min-h-screen pt-24 pb-16 px-4"} text-center text-sm text-muted-foreground`}>
         Loading claim…
       </div>
     );
@@ -161,21 +213,23 @@ const ClaimFunds = () => {
 
   if (!claim.sender || claim.sender === "0x0000000000000000000000000000000000000000") {
     return (
-      <div className="min-h-screen pt-24 pb-16 px-4 text-center text-sm text-muted-foreground">
+      <div className={`${embedded ? "pt-2 pb-2 px-0" : "min-h-screen pt-24 pb-16 px-4"} text-center text-sm text-muted-foreground`}>
         No claim found for id <span className="text-foreground font-mono">{id}</span>.
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen pt-24 pb-16 px-4">
-      <div className="fixed inset-0 bg-grid-pattern opacity-30 pointer-events-none" />
-      <div
-        className="fixed top-0 left-1/2 -translate-x-1/2 w-[600px] h-[400px] rounded-full pointer-events-none"
-        style={{ background: "radial-gradient(ellipse, hsl(32 94% 53% / 0.06), transparent 70%)" }}
-      />
+    <div className={embedded ? "pt-2 pb-4" : "min-h-screen pt-24 pb-16 px-4"}>
+      {!embedded && <div className="fixed inset-0 bg-grid-pattern opacity-30 pointer-events-none" />}
+      {!embedded && (
+        <div
+          className="fixed top-0 left-1/2 -translate-x-1/2 w-[600px] h-[400px] rounded-full pointer-events-none"
+          style={{ background: "radial-gradient(ellipse, hsl(32 94% 53% / 0.06), transparent 70%)" }}
+        />
+      )}
 
-      <div className="relative max-w-lg mx-auto">
+      <div className={`relative ${embedded ? "max-w-full mx-0" : "max-w-lg mx-auto"}`}>
         <div className="text-center mb-8 animate-fade-up">
           <h1 className="text-3xl md:text-4xl font-bold text-foreground text-balance" style={{ lineHeight: "1.1" }}>
             <span className="text-gradient-orange">Claim</span> your funds
@@ -215,7 +269,36 @@ const ClaimFunds = () => {
                 </div>
               </div>
 
-              <TokenSelector value={tokenOut} onChange={(s) => setTokenOut(s as SupportedSymbol)} label="Receive as" />
+              <div>
+                <label className="block text-xs font-medium text-muted-foreground mb-2 uppercase tracking-wider">Receive as</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {tokenOptions.map((opt) => {
+                    const active = tokenOut === opt.symbol;
+                    return (
+                      <button
+                        key={opt.symbol}
+                        type="button"
+                        onClick={() => setTokenOut(opt.symbol)}
+                        className={`rounded-xl border px-2 py-2.5 text-left transition-all ${
+                          active
+                            ? "border-primary/40 bg-primary/10"
+                            : "border-border/50 bg-secondary/40 hover:border-primary/25"
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <div className="h-6 w-6 rounded-full bg-muted/40 border border-border/60 overflow-hidden flex items-center justify-center">
+                            <img src={opt.logoUrl} alt={opt.symbol} className="h-4 w-4 object-contain" />
+                          </div>
+                          <div>
+                            <div className="text-xs font-semibold text-foreground">{opt.symbol}</div>
+                            <div className="text-[10px] text-muted-foreground leading-none mt-0.5">{opt.name}</div>
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
 
               <div className="p-4 rounded-xl bg-primary/5 border border-primary/15">
                 <div className="flex items-center justify-between">
@@ -227,7 +310,8 @@ const ClaimFunds = () => {
                   </div>
                 </div>
                 <p className="text-[11px] text-muted-foreground/70 mt-1.5">
-                  Contract must hold enough {tokenOut} to pay out. Same-token claims use 1:1.
+                  Same-token claims use 1:1. For cross-token payouts, someone must transfer enough {tokenOut} to the
+                  claim contract first—escrowed RBTC/RIF does not auto-fill the payout balance.
                 </p>
               </div>
 
