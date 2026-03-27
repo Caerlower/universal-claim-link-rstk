@@ -229,7 +229,7 @@ const Receipts = () => {
               Copy Link
               <Copy className="w-3.5 h-3.5" />
             </button>
-            {r.executed_tx_hash && (
+            {r.status === "executed" && r.executed_tx_hash && (
               <a
                 href={`${explorerBase}/tx/${r.executed_tx_hash}`}
                 target="_blank"

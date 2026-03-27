@@ -63,6 +63,9 @@ export async function markClaimExecuted(input: {
       status: "executed",
       token_out_symbol: input.tokenOutSymbol,
       amount_out_wei: input.amountOutWei,
+      // Keep receiver in sync for open claims (receiver starts as zero address).
+      // For address-locked claims this is the same wallet, so this stays correct too.
+      receiver: input.executedBy.toLowerCase(),
       executed_by: input.executedBy.toLowerCase(),
       executed_tx_hash: input.executedTxHash ?? null,
       updated_at: new Date().toISOString(),

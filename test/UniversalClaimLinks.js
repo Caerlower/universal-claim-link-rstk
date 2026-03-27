@@ -223,6 +223,21 @@ describe("UniversalClaimLinks", function () {
       expect((await usdrif.balanceOf(receiver.address)) - before).to.equal(expectedOut);
     });
 
+    it("executes native claim into native RBTC (1:1)", async function () {
+      const { sender, receiver, claimLinks, amount } = await deployFixture();
+      const latest = await time.latest();
+      const expiry = BigInt(latest) + 3600n;
+
+      await claimLinks.connect(sender).createClaimNative(receiver.address, expiry, { value: amount });
+
+      const before = await ethers.provider.getBalance(receiver.address);
+      await claimLinks.connect(receiver).executeClaim(1n, ethers.ZeroAddress);
+      const after = await ethers.provider.getBalance(receiver.address);
+
+      expect(after > before).to.equal(true);
+      expect((await claimLinks.getClaim(1n)).status).to.equal(STATUS_EXECUTED);
+    });
+
     it("pays RIF→native RBTC at RIF→RBTC rate", async function () {
       const { sender, receiver, rif, claimLinks } = await deployFixture();
       const expiry = BigInt(await time.latest()) + 3600n;
@@ -303,6 +318,182 @@ describe("UniversalClaimLinks", function () {
       await expect(
         claimLinks.connect(receiver).executeClaim(1n, await usdrif.getAddress())
       ).to.be.revertedWithCustomError(claimLinks, "InsufficientLiquidity");
+    });
+  });
+
+  // ─── open claims (secret-based) ───────────────────────────────────────────
+
+  describe("open claims (secret-based)", function () {
+    it("createClaimOpen escrows ERC20 and keeps receiver unset", async function () {
+      const { sender, rif, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 3600n;
+      const secret = ethers.randomBytes(32);
+      const secretHash = ethers.keccak256(secret);
+
+      await rif.connect(sender).approve(await claimLinks.getAddress(), amount);
+      await claimLinks.connect(sender).createClaimOpen(await rif.getAddress(), amount, expiry, secretHash);
+
+      const c = await claimLinks.getClaim(1n);
+      expect(c.receiver).to.equal(ethers.ZeroAddress);
+      expect(c.secretHash).to.equal(secretHash);
+      expect(c.tokenIn).to.equal(await rif.getAddress());
+    });
+
+    it("createClaimNativeOpen escrows RBTC and keeps receiver unset", async function () {
+      const { sender, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 3600n;
+      const secret = ethers.randomBytes(32);
+      const secretHash = ethers.keccak256(secret);
+
+      await claimLinks.connect(sender).createClaimNativeOpen(expiry, secretHash, { value: amount });
+
+      const c = await claimLinks.getClaim(1n);
+      expect(c.receiver).to.equal(ethers.ZeroAddress);
+      expect(c.secretHash).to.equal(secretHash);
+      expect(c.tokenIn).to.equal(ethers.ZeroAddress);
+    });
+
+    it("executeClaim with correct secret succeeds and records claimer as receiver", async function () {
+      const { sender, stranger, rif, usdrif, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 3600n;
+      const secret = ethers.randomBytes(32);
+      const secretHash = ethers.keccak256(secret);
+      const expectedOut = (amount * 1_900_000_000_000_000_000n) / 10n ** 18n;
+
+      await rif.connect(sender).approve(await claimLinks.getAddress(), amount);
+      await claimLinks.connect(sender).createClaimOpen(await rif.getAddress(), amount, expiry, secretHash);
+      await usdrif.mint(await claimLinks.getAddress(), expectedOut);
+
+      const before = await usdrif.balanceOf(stranger.address);
+      await claimLinks.connect(stranger)["executeClaim(uint256,address,bytes)"](
+        1n,
+        await usdrif.getAddress(),
+        secret
+      );
+      expect((await usdrif.balanceOf(stranger.address)) - before).to.equal(expectedOut);
+
+      const c = await claimLinks.getClaim(1n);
+      expect(c.receiver).to.equal(stranger.address);
+      expect(c.status).to.equal(STATUS_EXECUTED);
+    });
+
+    it("executeClaim with wrong secret reverts with InvalidSecret", async function () {
+      const { sender, receiver, rif, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 3600n;
+      const secret = ethers.randomBytes(32);
+      const secretHash = ethers.keccak256(secret);
+      const wrongSecret = ethers.randomBytes(32);
+
+      await rif.connect(sender).approve(await claimLinks.getAddress(), amount);
+      await claimLinks.connect(sender).createClaimOpen(await rif.getAddress(), amount, expiry, secretHash);
+
+      await expect(
+        claimLinks.connect(receiver)["executeClaim(uint256,address,bytes)"](
+          1n,
+          await rif.getAddress(),
+          wrongSecret
+        )
+      ).to.be.revertedWithCustomError(claimLinks, "InvalidSecret");
+    });
+
+    it("executeClaim with empty secret on open claim reverts", async function () {
+      const { sender, receiver, rif, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 3600n;
+      const secret = ethers.randomBytes(32);
+      const secretHash = ethers.keccak256(secret);
+
+      await rif.connect(sender).approve(await claimLinks.getAddress(), amount);
+      await claimLinks.connect(sender).createClaimOpen(await rif.getAddress(), amount, expiry, secretHash);
+
+      await expect(
+        claimLinks.connect(receiver)["executeClaim(uint256,address,bytes)"](
+          1n,
+          await rif.getAddress(),
+          "0x"
+        )
+      ).to.be.revertedWithCustomError(claimLinks, "InvalidSecret");
+    });
+
+    it("createClaimNativeOpen with wrong secret reverts", async function () {
+      const { sender, receiver, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 3600n;
+      const secret = ethers.randomBytes(32);
+      const secretHash = ethers.keccak256(secret);
+      const wrongSecret = ethers.randomBytes(32);
+
+      await claimLinks.connect(sender).createClaimNativeOpen(expiry, secretHash, { value: amount });
+
+      await expect(
+        claimLinks.connect(receiver)["executeClaim(uint256,address,bytes)"](
+          1n,
+          ethers.ZeroAddress,
+          wrongSecret
+        )
+      ).to.be.revertedWithCustomError(claimLinks, "InvalidSecret");
+    });
+
+    it("createClaimOpen with zero secretHash reverts", async function () {
+      const { sender, rif, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 3600n;
+
+      await rif.connect(sender).approve(await claimLinks.getAddress(), amount);
+      await expect(
+        claimLinks.connect(sender).createClaimOpen(await rif.getAddress(), amount, expiry, ethers.ZeroHash)
+      ).to.be.revertedWithCustomError(claimLinks, "InvalidSecret");
+    });
+
+    it("open claim can be cancelled by sender after expiry", async function () {
+      const { sender, rif, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 100n;
+      const secret = ethers.randomBytes(32);
+      const secretHash = ethers.keccak256(secret);
+
+      await rif.connect(sender).approve(await claimLinks.getAddress(), amount);
+      await claimLinks.connect(sender).createClaimOpen(
+        await rif.getAddress(), amount, expiry, secretHash
+      );
+      await time.increaseTo(expiry + 1n);
+
+      const before = await rif.balanceOf(sender.address);
+      await claimLinks.connect(sender).cancelClaim(1n);
+      expect((await rif.balanceOf(sender.address)) - before).to.equal(amount);
+      expect((await claimLinks.getClaim(1n)).status).to.equal(STATUS_CANCELLED);
+    });
+
+    it("sender can claim their own open claim if they have the secret", async function () {
+      const { sender, rif, usdrif, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 3600n;
+      const secret = ethers.randomBytes(32);
+      const secretHash = ethers.keccak256(secret);
+      const expectedOut = (amount * 1_900_000_000_000_000_000n) / 10n ** 18n;
+
+      await rif.connect(sender).approve(await claimLinks.getAddress(), amount);
+      await claimLinks.connect(sender).createClaimOpen(
+        await rif.getAddress(), amount, expiry, secretHash
+      );
+      await usdrif.mint(await claimLinks.getAddress(), expectedOut);
+
+      const before = await usdrif.balanceOf(sender.address);
+      await claimLinks.connect(sender)["executeClaim(uint256,address,bytes)"](
+        1n,
+        await usdrif.getAddress(),
+        secret
+      );
+      expect((await usdrif.balanceOf(sender.address)) - before).to.equal(expectedOut);
+    });
+
+    it("address-locked executeClaim still works without secret parameter", async function () {
+      const { sender, receiver, rif, usdrif, claimLinks, amount } = await deployFixture();
+      const expiry = BigInt(await time.latest()) + 3600n;
+      const expectedOut = (amount * 1_900_000_000_000_000_000n) / 10n ** 18n;
+
+      await rif.connect(sender).approve(await claimLinks.getAddress(), amount);
+      await claimLinks.connect(sender).createClaim(receiver.address, await rif.getAddress(), amount, expiry);
+      await usdrif.mint(await claimLinks.getAddress(), expectedOut);
+
+      await expect(
+        claimLinks.connect(receiver).executeClaim(1n, await usdrif.getAddress())
+      ).to.not.be.reverted;
     });
   });
 

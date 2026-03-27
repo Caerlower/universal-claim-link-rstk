@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Copy, Check, ExternalLink } from "lucide-react";
-import { isAddress, maxUint256, parseUnits } from "viem";
+import { bytesToHex, isAddress, keccak256, maxUint256, parseUnits } from "viem";
 import { readContract, simulateContract, waitForTransactionReceipt, writeContract } from "viem/actions";
 import { toast } from "sonner";
 import universalClaimLinksAbi from "@/lib/contracts/universalClaimLinksAbi.json";
@@ -54,6 +54,7 @@ const CreateClaim = () => {
   const isConnected = !!address;
 
   const [selectedToken, setSelectedToken] = useState(0);
+  const [claimMode, setClaimMode] = useState<"locked" | "open">("locked");
   const [amount, setAmount] = useState("");
   const [receiver, setReceiver] = useState("");
   const [expiryAt, setExpiryAt] = useState(() => {
@@ -67,6 +68,7 @@ const CreateClaim = () => {
   const [lastTxHash, setLastTxHash] = useState<string | undefined>();
 
   const currentToken = tokens[selectedToken]?.symbol ?? "RBTC";
+  const isOpenClaimMode = claimMode === "open";
   const explorerBase = import.meta.env.VITE_RSK_EXPLORER_URL?.replace(/\/$/, "") ?? "https://explorer.testnet.rootstock.io";
 
   const handleCreate = async () => {
@@ -78,13 +80,15 @@ const CreateClaim = () => {
       toast.error("Connect wallet first");
       return;
     }
-    if (!isAddress(receiver)) {
-      toast.error("Enter a valid receiver address");
-      return;
-    }
-    if (receiver.toLowerCase() === address.toLowerCase()) {
-      toast.error("Receiver must be different from sender");
-      return;
+    if (!isOpenClaimMode) {
+      if (!isAddress(receiver)) {
+        toast.error("Enter a valid receiver address");
+        return;
+      }
+      if (receiver.toLowerCase() === address.toLowerCase()) {
+        toast.error("Receiver must be different from sender");
+        return;
+      }
     }
     if (!amount || Number(amount) <= 0) {
       toast.error("Enter an amount");
@@ -105,6 +109,19 @@ const CreateClaim = () => {
       const publicClient = getPublicClient();
       const tokenIn = tokenAddressForSymbol(env, currentToken);
       const useNativeRbtc = currentToken === "RBTC";
+      const receiverForTx = receiver as `0x${string}`;
+      const receiverForRecord = isOpenClaimMode
+        ? "0x0000000000000000000000000000000000000000"
+        : receiver.toLowerCase();
+
+      let secretForLink: `0x${string}` | null = null;
+      let secretHash: `0x${string}` | null = null;
+      if (isOpenClaimMode) {
+        const bytes = new Uint8Array(32);
+        crypto.getRandomValues(bytes);
+        secretForLink = bytesToHex(bytes);
+        secretHash = keccak256(secretForLink);
+      }
 
       let amountWei: bigint;
       let didApprove = false;
@@ -161,22 +178,35 @@ const CreateClaim = () => {
 
       let hashCreate: `0x${string}`;
       if (useNativeRbtc) {
-        hashCreate = await writeContract(writeClient as never, {
-          chain,
-          address: env.claimLinks,
-          abi: universalClaimLinksAbi,
-          functionName: "createClaimNative",
-          args: [receiver as `0x${string}`, expiryTs],
-          value: amountWei,
-        } as never);
+        if (isOpenClaimMode) {
+          hashCreate = await writeContract(writeClient as never, {
+            chain,
+            address: env.claimLinks,
+            abi: universalClaimLinksAbi,
+            functionName: "createClaimNativeOpen",
+            args: [expiryTs, secretHash!],
+            value: amountWei,
+          } as never);
+        } else {
+          hashCreate = await writeContract(writeClient as never, {
+            chain,
+            address: env.claimLinks,
+            abi: universalClaimLinksAbi,
+            functionName: "createClaimNative",
+            args: [receiverForTx, expiryTs],
+            value: amountWei,
+          } as never);
+        }
       } else {
-        const createArgs = [receiver as `0x${string}`, tokenIn, amountWei, expiryTs] as const;
+        const createArgs = isOpenClaimMode
+          ? ([tokenIn, amountWei, expiryTs, secretHash!] as const)
+          : ([receiverForTx, tokenIn, amountWei, expiryTs] as const);
         try {
           hashCreate = await writeContract(writeClient as never, {
             chain,
             address: env.claimLinks,
             abi: universalClaimLinksAbi,
-            functionName: "createClaim",
+            functionName: isOpenClaimMode ? "createClaimOpen" : "createClaim",
             args: createArgs,
           } as never);
         } catch (e) {
@@ -191,14 +221,14 @@ const CreateClaim = () => {
               chain,
               address: env.claimLinks,
               abi: universalClaimLinksAbi,
-              functionName: "createClaim",
+              functionName: isOpenClaimMode ? "createClaimOpen" : "createClaim",
               args: createArgs,
             } as never);
           } else {
             await simulateContract(publicClient as never, {
               address: env.claimLinks,
               abi: universalClaimLinksAbi,
-              functionName: "createClaim",
+              functionName: isOpenClaimMode ? "createClaimOpen" : "createClaim",
               args: createArgs,
               account: address,
             } as never);
@@ -215,7 +245,7 @@ const CreateClaim = () => {
       if (claimId == null) throw new Error("Could not parse claim id");
 
       const path = `/app?tab=claim&id=${claimId.toString()}`;
-      const full = `${window.location.origin}${path}`;
+      const full = `${window.location.origin}${path}${isOpenClaimMode && secretForLink ? `#${secretForLink}` : ""}`;
       setClaimLink(full);
 
       if (isSupabaseConfigured) {
@@ -224,7 +254,7 @@ const CreateClaim = () => {
             claimId: claimId.toString(),
             chainId: chain.id,
             sender: address,
-            receiver,
+            receiver: receiverForRecord,
             tokenInSymbol: currentToken,
             amountInWei: amountWei.toString(),
             expiryTs: expiryTs.toString(),
@@ -257,15 +287,53 @@ const CreateClaim = () => {
     <div className="grid lg:grid-cols-2 gap-8">
       <div className="space-y-6">
         <div>
-          <label className="tracking-label mb-3 block">Receiver Address</label>
-          <input
-            type="text"
-            placeholder="0x..."
-            value={receiver}
-            onChange={(e) => setReceiver(e.target.value.trim())}
-            className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary/50 transition-all"
-          />
+          <label className="tracking-label mb-3 block">Claim Type</label>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => setClaimMode("locked")}
+              className={`py-2.5 rounded-xl text-sm font-medium transition-all ${
+                !isOpenClaimMode
+                  ? "bg-primary/15 text-primary border border-primary/30"
+                  : "bg-secondary/60 text-muted-foreground border border-border/50"
+              }`}
+            >
+              Address-Locked
+            </button>
+            <button
+              type="button"
+              onClick={() => setClaimMode("open")}
+              className={`py-2.5 rounded-xl text-sm font-medium transition-all ${
+                isOpenClaimMode
+                  ? "bg-primary/15 text-primary border border-primary/30"
+                  : "bg-secondary/60 text-muted-foreground border border-border/50"
+              }`}
+            >
+              Open (Secret)
+            </button>
+          </div>
         </div>
+
+        {!isOpenClaimMode && (
+          <div>
+            <label className="tracking-label mb-3 block">Receiver Address</label>
+            <input
+              type="text"
+              placeholder="0x..."
+              value={receiver}
+              onChange={(e) => setReceiver(e.target.value.trim())}
+              className="w-full bg-muted/50 border border-border rounded-xl px-4 py-3.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary/50 transition-all"
+            />
+          </div>
+        )}
+
+        {isOpenClaimMode && (
+          <p className="text-xs text-muted-foreground">
+            Open claim has no fixed receiver. The generated link includes a secret in the URL fragment (`#...`) so anyone
+            with that link can claim.
+          </p>
+        )}
+        
 
         <div>
           <label className="tracking-label mb-3 block">Token</label>
@@ -339,7 +407,9 @@ const CreateClaim = () => {
                 </div>
                 <div className="flex justify-between items-center py-3 border-b border-border/30">
                   <span className="text-sm text-muted-foreground">Receiver</span>
-                  <span className="text-sm font-mono text-foreground/70">{receiver ? `${receiver.slice(0, 6)}...${receiver.slice(-4)}` : "—"}</span>
+                  <span className="text-sm font-mono text-foreground/70">
+                    {isOpenClaimMode ? "Open (secret link)" : receiver ? `${receiver.slice(0, 6)}...${receiver.slice(-4)}` : "—"}
+                  </span>
                 </div>
                 <div className="flex justify-between items-center py-3">
                   <span className="text-sm text-muted-foreground">Expiry</span>

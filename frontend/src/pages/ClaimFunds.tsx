@@ -36,6 +36,7 @@ type ClaimFromContract = {
   sender: `0x${string}`;
   receiver: `0x${string}`;
   tokenIn: `0x${string}`;
+  secretHash: `0x${string}`;
 };
 
 const tokenOptions: { symbol: SupportedSymbol; name: string; logoUrl: string }[] = [
@@ -108,6 +109,17 @@ const ClaimFunds = ({ claimIdOverride, embedded = false }: ClaimFundsProps) => {
 
   const explorerBase =
     import.meta.env.VITE_RSK_EXPLORER_URL?.replace(/\/$/, "") ?? "https://explorer.testnet.rootstock.io";
+  const zeroAddress = "0x0000000000000000000000000000000000000000";
+  const zeroHash = "0x0000000000000000000000000000000000000000000000000000000000000000";
+
+  const secretFromHash = useMemo(() => {
+    const raw = window.location.hash.replace(/^#/, "").trim();
+    if (!raw) return null;
+    const withPrefix = raw.startsWith("0x") ? raw : `0x${raw}`;
+    const isHex = /^0x[0-9a-fA-F]+$/.test(withPrefix);
+    if (!isHex || (withPrefix.length - 2) % 2 !== 0) return null;
+    return withPrefix as `0x${string}`;
+  }, []);
 
   const tokenInSymbol = env && claim?.tokenIn ? symbolForTokenAddress(env, claim.tokenIn) : "RBTC";
   const amountInFmt = claim?.amountIn != null ? formatUnits(claim.amountIn, 18) : "0";
@@ -120,6 +132,8 @@ const ClaimFunds = ({ claimIdOverride, embedded = false }: ClaimFundsProps) => {
 
   const isReceiver =
     !!address && !!claim?.receiver && address.toLowerCase() === claim.receiver.toLowerCase();
+  const isOpenClaim = !!claim && claim.receiver === zeroAddress && claim.secretHash !== zeroHash;
+  const hasSecret = !!secretFromHash;
   const claimStatus = claim != null ? Number(claim.status) : -1;
 
   const isExpired =
@@ -129,7 +143,7 @@ const ClaimFunds = ({ claimIdOverride, embedded = false }: ClaimFundsProps) => {
     claim != null &&
     claimStatus === STATUS_OPEN &&
     claimId != null &&
-    isReceiver &&
+    (isOpenClaim ? hasSecret : isReceiver) &&
     env &&
     !!viemClient &&
     ready &&
@@ -143,8 +157,12 @@ const ClaimFunds = ({ claimIdOverride, embedded = false }: ClaimFundsProps) => {
       return;
     }
     if (!address) return;
-    if (!isReceiver) {
+    if (!isOpenClaim && !isReceiver) {
       toast.error("Only the designated receiver can claim.");
+      return;
+    }
+    if (isOpenClaim && !hasSecret) {
+      toast.error("Secret missing in claim link. Use the full link with #secret.");
       return;
     }
     if (Number(claim.status) !== STATUS_OPEN) {
@@ -168,23 +186,44 @@ const ClaimFunds = ({ claimIdOverride, embedded = false }: ClaimFundsProps) => {
 
       let hash: `0x${string}`;
       try {
-        hash = await writeContract(writeClient, {
-          chain: getAppChain(),
-          address: env.claimLinks,
-          abi: universalClaimLinksAbi,
-          functionName: "executeClaim",
-          args: [claimId, out],
-          account,
-        });
+        if (isOpenClaim) {
+          hash = await writeContract(writeClient, {
+            chain: getAppChain(),
+            address: env.claimLinks,
+            abi: universalClaimLinksAbi,
+            functionName: "executeClaim",
+            args: [claimId, out, secretFromHash!],
+            account,
+          });
+        } else {
+          hash = await writeContract(writeClient, {
+            chain: getAppChain(),
+            address: env.claimLinks,
+            abi: universalClaimLinksAbi,
+            functionName: "executeClaim",
+            args: [claimId, out],
+            account,
+          });
+        }
       } catch (e) {
         // Fallback: simulation to get a readable revert reason.
-        await simulateContract(publicClient as never, {
-          address: env.claimLinks,
-          abi: universalClaimLinksAbi,
-          functionName: "executeClaim",
-          args: [claimId, out],
-          account,
-        } as never);
+        if (isOpenClaim) {
+          await simulateContract(publicClient as never, {
+            address: env.claimLinks,
+            abi: universalClaimLinksAbi,
+            functionName: "executeClaim",
+            args: [claimId, out, secretFromHash!],
+            account,
+          } as never);
+        } else {
+          await simulateContract(publicClient as never, {
+            address: env.claimLinks,
+            abi: universalClaimLinksAbi,
+            functionName: "executeClaim",
+            args: [claimId, out],
+            account,
+          } as never);
+        }
         throw e;
       }
       setLastTxHash(hash);
@@ -363,8 +402,14 @@ const ClaimFunds = ({ claimIdOverride, embedded = false }: ClaimFundsProps) => {
               {isConnected && !ready && !(isExternalEvm && !hasInjectedProvider) && (
                 <p className="text-xs text-muted-foreground text-center">Preparing your Para wallet…</p>
               )}
-              {isConnected && ready && !isReceiver && (
+              {isConnected && ready && !isOpenClaim && !isReceiver && (
                 <p className="text-xs text-destructive/90 text-center">Connected wallet is not the receiver for this claim.</p>
+              )}
+              {isConnected && ready && isOpenClaim && !hasSecret && (
+                <p className="text-xs text-destructive/90 text-center">Missing secret in URL (`#...`). Use the full shared link.</p>
+              )}
+              {isConnected && ready && isOpenClaim && hasSecret && (
+                <p className="text-xs text-muted-foreground text-center">Open claim detected. Any wallet with this secret can claim.</p>
               )}
               {isExpired && claimStatus !== 1 && (
                 <p className="text-xs text-destructive/90 text-center">This claim has expired.</p>

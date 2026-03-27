@@ -8,13 +8,6 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
-/// @title UniversalClaimLinks
-/// @notice Production claim-link escrow on Rootstock (or any EVM chain). Each claim locks the *actual* tokens
-/// received from `transferFrom` (supports fee-on-transfer tokens) or native RBTC from `createClaimNative`.
-/// The receiver claims once before expiry and chooses RIF or USDRIF at hardcoded rates. The contract must hold
-/// enough `tokenOut` balance to pay (operational liquidity). Escrowed `tokenIn` stays in the contract after
-/// execution unless the sender cancels after expiry.
-/// @dev `Claim.tokenIn == address(0)` denotes native RBTC (tRBTC / RBTC) held in this contract’s balance.
 contract UniversalClaimLinks is ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
 
@@ -23,28 +16,19 @@ contract UniversalClaimLinks is ReentrancyGuard, Pausable {
     uint8 internal constant STATUS_CANCELLED = 2;
 
     uint256 internal constant RATE_SCALE = 1e18;
-    uint40 internal constant MAX_EXPIRY_DURATION = 30 days;
-
-    /// @dev Sentinel for native RBTC in `Claim.tokenIn` (not an ERC-20).
+    uint256 internal constant MAX_EXPIRY_DURATION = 30 days;
     address internal constant TOKEN_NATIVE = address(0);
 
-    /// @dev Example cross-rates (18-decimal units). amountOut = amountIn * rate / RATE_SCALE. Replace before production.
-    /// Native RBTC amounts use the same legs as the former WRBTC ERC-20 (1e18 wei per “BTC unit”).
     uint256 internal constant RATE_RBTC_TO_RIF = 50_000e18;
     uint256 internal constant RATE_RBTC_TO_USDRIF = 95_000e18;
-    /// @dev Inverse of RATE_RBTC_TO_RIF: RATE_SCALE**2 / RATE_RBTC_TO_RIF
     uint256 internal constant RATE_RIF_TO_RBTC = 20_000_000_000_000;
-    /// @dev Inverse of RATE_RBTC_TO_USDRIF: RATE_SCALE**2 / RATE_RBTC_TO_USDRIF (integer floor)
     uint256 internal constant RATE_USDRIF_TO_RBTC = 10_526_315_789_473;
-    /// @dev RIF per USDRIF implied by RBTC legs: (RBTC->RIF) / (RBTC->USDRIF) in fixed point.
     uint256 internal constant RATE_RIF_TO_USDRIF = 1_900_000_000_000_000_000;
-    /// @dev Inverse of RATE_RIF_TO_USDRIF
     uint256 internal constant RATE_USDRIF_TO_RIF = 526_315_789_473_684_210;
 
     IERC20 public immutable tokenRIF;
     IERC20 public immutable tokenUSDRIF;
     address public owner;
-
     uint256 public nextClaimId;
 
     struct Claim {
@@ -52,21 +36,22 @@ contract UniversalClaimLinks is ReentrancyGuard, Pausable {
         uint40 expiry;
         uint8 status;
         address sender;
-        address receiver;
+        address receiver;   // address(0) for open claims until executed
         address tokenIn;
+        bytes32 secretHash; // bytes32(0) for address-locked claims
     }
 
-    mapping(uint256 claimId => Claim) private _claims;
+    mapping(uint256 => Claim) private _claims;
 
     event ClaimCreated(
         uint256 indexed claimId,
         address indexed sender,
-        address indexed receiver,
+        address indexed receiver, // address(0) = open claim
         address tokenIn,
         uint256 amountIn,
-        uint40 expiry
+        uint40 expiry,
+        bool isOpen
     );
-
     event ClaimExecuted(
         uint256 indexed claimId,
         address indexed receiver,
@@ -75,7 +60,6 @@ contract UniversalClaimLinks is ReentrancyGuard, Pausable {
         uint256 amountIn,
         uint256 amountOut
     );
-
     event ClaimCancelled(uint256 indexed claimId, address indexed sender, address tokenIn, uint256 amountIn);
     event LiquidityDeposited(address indexed sender, uint256 amount);
 
@@ -83,6 +67,7 @@ contract UniversalClaimLinks is ReentrancyGuard, Pausable {
     error InvalidReceiver();
     error InvalidAmount();
     error InvalidExpiry();
+    error InvalidSecret();
     error UnsupportedToken();
     error ClaimNotFound();
     error NotReceiver();
@@ -101,19 +86,17 @@ contract UniversalClaimLinks is ReentrancyGuard, Pausable {
     constructor(address rif, address usdrif) {
         if (rif == address(0) || usdrif == address(0)) revert ZeroAddress();
         if (rif == usdrif) revert UnsupportedToken();
-
         tokenRIF = IERC20(rif);
         tokenUSDRIF = IERC20(usdrif);
-
         nextClaimId = 1;
         owner = msg.sender;
     }
 
-    /// @notice Accept native RBTC deposits (used to pre-fund payout liquidity for native outputs).
     receive() external payable {
         emit LiquidityDeposited(msg.sender, msg.value);
     }
 
+    // Address-locked ERC20 claim
     function createClaim(address receiver, IERC20 tokenIn, uint128 amountIn, uint40 expiry)
         external
         nonReentrant
@@ -127,12 +110,7 @@ contract UniversalClaimLinks is ReentrancyGuard, Pausable {
         if (address(tokenIn) == TOKEN_NATIVE) revert UnsupportedToken();
         if (!_isSupported(tokenIn)) revert UnsupportedToken();
 
-        uint256 balBefore = tokenIn.balanceOf(address(this));
-        tokenIn.safeTransferFrom(msg.sender, address(this), amountIn);
-        uint256 received = tokenIn.balanceOf(address(this)) - balBefore;
-        if (received == 0) revert InvalidAmount();
-        if (received > type(uint128).max) revert InvalidAmount();
-
+        uint256 received = _pullTokens(tokenIn, amountIn);
         claimId = nextClaimId++;
         _claims[claimId] = Claim({
             amountIn: uint128(received),
@@ -140,13 +118,14 @@ contract UniversalClaimLinks is ReentrancyGuard, Pausable {
             status: STATUS_OPEN,
             sender: msg.sender,
             receiver: receiver,
-            tokenIn: address(tokenIn)
+            tokenIn: address(tokenIn),
+            secretHash: bytes32(0)
         });
 
-        emit ClaimCreated(claimId, msg.sender, receiver, address(tokenIn), received, expiry);
+        emit ClaimCreated(claimId, msg.sender, receiver, address(tokenIn), received, expiry, false);
     }
 
-    /// @notice Create a claim escrowing native RBTC (testnet tRBTC / mainnet RBTC). Held as contract balance; `tokenIn` is `address(0)`.
+    // Address-locked native claim
     function createClaimNative(address receiver, uint40 expiry)
         external
         payable
@@ -160,29 +139,104 @@ contract UniversalClaimLinks is ReentrancyGuard, Pausable {
         if (expiry > block.timestamp + MAX_EXPIRY_DURATION) revert InvalidExpiry();
         if (msg.value > type(uint128).max) revert InvalidAmount();
 
-        uint256 received = msg.value;
+        claimId = nextClaimId++;
+        _claims[claimId] = Claim({
+            amountIn: uint128(msg.value),
+            expiry: expiry,
+            status: STATUS_OPEN,
+            sender: msg.sender,
+            receiver: receiver,
+            tokenIn: TOKEN_NATIVE,
+            secretHash: bytes32(0)
+        });
 
+        emit ClaimCreated(claimId, msg.sender, receiver, TOKEN_NATIVE, msg.value, expiry, false);
+    }
+
+    // Open ERC20 claim (secret-based)
+    function createClaimOpen(IERC20 tokenIn, uint128 amountIn, uint40 expiry, bytes32 secretHash)
+        external
+        nonReentrant
+        whenNotPaused
+        returns (uint256 claimId)
+    {
+        if (secretHash == bytes32(0)) revert InvalidSecret();
+        if (amountIn == 0) revert InvalidAmount();
+        if (expiry <= block.timestamp) revert InvalidExpiry();
+        if (expiry > block.timestamp + MAX_EXPIRY_DURATION) revert InvalidExpiry();
+        if (address(tokenIn) == TOKEN_NATIVE) revert UnsupportedToken();
+        if (!_isSupported(tokenIn)) revert UnsupportedToken();
+
+        uint256 received = _pullTokens(tokenIn, amountIn);
         claimId = nextClaimId++;
         _claims[claimId] = Claim({
             amountIn: uint128(received),
             expiry: expiry,
             status: STATUS_OPEN,
             sender: msg.sender,
-            receiver: receiver,
-            tokenIn: TOKEN_NATIVE
+            receiver: address(0),
+            tokenIn: address(tokenIn),
+            secretHash: secretHash
         });
 
-        emit ClaimCreated(claimId, msg.sender, receiver, TOKEN_NATIVE, received, expiry);
+        emit ClaimCreated(claimId, msg.sender, address(0), address(tokenIn), received, expiry, true);
     }
 
+    // Open native claim (secret-based)
+    function createClaimNativeOpen(uint40 expiry, bytes32 secretHash)
+        external
+        payable
+        nonReentrant
+        whenNotPaused
+        returns (uint256 claimId)
+    {
+        if (secretHash == bytes32(0)) revert InvalidSecret();
+        if (msg.value == 0) revert InvalidAmount();
+        if (expiry <= block.timestamp) revert InvalidExpiry();
+        if (expiry > block.timestamp + MAX_EXPIRY_DURATION) revert InvalidExpiry();
+        if (msg.value > type(uint128).max) revert InvalidAmount();
+
+        claimId = nextClaimId++;
+        _claims[claimId] = Claim({
+            amountIn: uint128(msg.value),
+            expiry: expiry,
+            status: STATUS_OPEN,
+            sender: msg.sender,
+            receiver: address(0),
+            tokenIn: TOKEN_NATIVE,
+            secretHash: secretHash
+        });
+
+        emit ClaimCreated(claimId, msg.sender, address(0), TOKEN_NATIVE, msg.value, expiry, true);
+    }
+
+    // Backward-compatible execute for address-locked claims (or open claims with explicit empty secret).
     function executeClaim(uint256 claimId, address tokenOut) external nonReentrant {
+        _executeClaim(claimId, tokenOut, "");
+    }
+
+    // Secret-aware execute for open claims.
+    function executeClaim(uint256 claimId, address tokenOut, bytes calldata secret) external nonReentrant {
+        _executeClaim(claimId, tokenOut, secret);
+    }
+
+    function _executeClaim(uint256 claimId, address tokenOut, bytes memory secret) internal {
         Claim storage c = _claims[claimId];
         if (c.sender == address(0)) revert ClaimNotFound();
         if (c.status != STATUS_OPEN) revert NotOpen();
         if (block.timestamp >= c.expiry) revert ClaimExpired();
-        if (msg.sender != c.receiver) revert NotReceiver();
+
+        if (c.secretHash == bytes32(0)) {
+            if (msg.sender != c.receiver) revert NotReceiver();
+        } else {
+            if (keccak256(secret) != c.secretHash) revert InvalidSecret();
+            c.receiver = msg.sender;
+        }
+
         if (!_isSupportedTokenOut(tokenOut)) revert UnsupportedToken();
-        if (tokenOut == c.tokenIn) revert UnsupportedToken();
+        // Same-token payouts are only blocked for ERC20 legs.
+        // Native->native is safe and should be allowed.
+        if (tokenOut == c.tokenIn && tokenOut != TOKEN_NATIVE) revert UnsupportedToken();
 
         uint256 rate = _conversionRate(c.tokenIn, tokenOut);
         if (rate == 0) revert UnsupportedToken();
@@ -233,16 +287,19 @@ contract UniversalClaimLinks is ReentrancyGuard, Pausable {
         }
     }
 
-    function pause() external onlyOwner {
-        _pause();
-    }
-
-    function unpause() external onlyOwner {
-        _unpause();
-    }
+    function pause() external onlyOwner { _pause(); }
+    function unpause() external onlyOwner { _unpause(); }
 
     function getClaim(uint256 claimId) external view returns (Claim memory) {
         return _claims[claimId];
+    }
+
+    function _pullTokens(IERC20 token, uint128 amount) internal returns (uint256 received) {
+        uint256 balBefore = token.balanceOf(address(this));
+        token.safeTransferFrom(msg.sender, address(this), amount);
+        received = token.balanceOf(address(this)) - balBefore;
+        if (received == 0) revert InvalidAmount();
+        if (received > type(uint128).max) revert InvalidAmount();
     }
 
     function _isSupported(IERC20 token) internal view returns (bool) {
@@ -254,7 +311,6 @@ contract UniversalClaimLinks is ReentrancyGuard, Pausable {
         return tokenOut == TOKEN_NATIVE || tokenOut == address(tokenRIF) || tokenOut == address(tokenUSDRIF);
     }
 
-    /// @dev Fixed-point rate: amountOut = amountIn * rate / RATE_SCALE. Tune `RATE_*` constants for your market.
     function _conversionRate(address tokenIn, address tokenOut) internal view returns (uint256) {
         if (tokenIn == tokenOut) return RATE_SCALE;
 
