@@ -3,10 +3,17 @@
 RootClaim is a claim-link app on Rootstock that lets people send funds through shareable links:
 
 - A sender creates a claim link with `RBTC`, `RIF`, or `USDRIF`.
-- The receiver claims once before expiry.
+- The receiver claims once before expiry (or anyone with the secret for **open** claims).
 - Receiver chooses payout token (`RBTC`, `RIF`, `USDRIF`).
 - Wallet connection and signing are handled by Para.
 - Optional Supabase storage powers Sent/Received history in the UI.
+
+---
+
+## Verified Contract (Rootstock Testnet)
+
+- Deployed & verified at: `0x657c04c587eb71c98a3b2b6915f04f33e016d6cd`  
+Explorer: `https://explorer.testnet.rootstock.io/address/0x657c04c587eb71c98a3b2b6915f04f33e016d6cd?tab=contract`
 
 ---
 
@@ -17,6 +24,26 @@ RootClaim is a claim-link app on Rootstock that lets people send funds through s
 - Dynamic claim UX in app tab (`/app?tab=claim&id=<claimId>`).
 - Supabase-backed claim history (`Sent Links`, `Received Links`).
 - Para wallet integration with MetaMask/Phantom (+ optional WalletConnect).
+
+---
+
+## On-chain Rules (What the Contract Enforces)
+
+- **Escrowed funds**: input token is pulled at creation and held until executed/cancelled.
+- **Expiry**: a claim can be executed only before `expiry`. After expiry, only the sender can cancel to recover funds.
+- **Who can claim**
+  - **Address-locked**: only the designated receiver can execute.
+  - **Open (secret)**: anyone who knows the secret can execute; the contract records the claimer as receiver.
+- **Token-out safety**: ERC-20 same-token payout is blocked to prevent draining the contract’s liquidity pool. (Native `RBTC → RBTC` remains supported.)
+- **Operational controls**: owner can pause/unpause, and sweep mistakenly locked `tokenIn`.
+
+---
+
+## Design Choices (Why It Works This Way)
+
+- **No backend required**: the “link” is just a claim id (and optional secret). Funds custody and rules live on-chain.
+- **Secret in URL fragment**: open-claim secrets are stored after `#...` so they’re not sent to servers or logged in typical request paths.
+- **Manual refunds**: expiry doesn’t auto-send funds back (no cron on-chain). Sender uses `cancelClaim` to reclaim escrow after expiry.
 
 ---
 
@@ -71,10 +98,10 @@ sequenceDiagram
   participant Receiver as Receiver
   participant DB as Supabase (optional)
 
-  Sender->>App: Fill form (receiver, token, amount, expiry)
+  Sender->>App: Fill form (locked receiver OR open secret, token, amount, expiry)
   App->>Wallet: Request signature
   Wallet-->>App: Signed transaction
-  App->>Contract: createClaim / createClaimNative
+  App->>Contract: createClaim / createClaimNative OR createClaimOpen / createClaimNativeOpen
   Contract-->>Contract: Store claim + hold funds in escrow
   Contract-->>App: Emit ClaimCreated(claimId)
   App-->>Sender: Show share link with claimId
@@ -83,7 +110,7 @@ sequenceDiagram
   Receiver->>App: Open claim link
   App->>Wallet: Request signature for executeClaim
   Wallet-->>App: Signed transaction
-  App->>Contract: executeClaim(claimId, tokenOut)
+  App->>Contract: executeClaim(claimId, tokenOut[, secret])
   Contract-->>Receiver: Transfer payout token
   App->>DB: Mark claim executed (optional)
 
@@ -258,9 +285,13 @@ After setup:
 1. Connect wallet with Para
 2. Choose input token and amount
 3. Set exact expiry datetime
-4. Submit transaction
-5. App returns a shareable claim URL:
-  - `/app?tab=claim&id=<claimId>`
+4. Choose claim type:
+  - Address-locked (receiver address)
+  - Open (secret link)
+5. Submit transaction
+6. App returns a shareable claim URL:
+  - Address-locked: `/app?tab=claim&id=<claimId>`
+  - Open: `/app?tab=claim&id=<claimId>#<secret>`
 
 ### Claim
 
@@ -294,7 +325,7 @@ After setup:
 
 - Never commit private keys or secrets
 - `VITE_`* vars are public in frontend bundle
-- `VITE_*` vars are public in the browser bundle
+- `VITE_`* vars are public in the browser bundle
 - Do not place Supabase `service_role` key in frontend
 - Treat root deployer `PRIVATE_KEY` as sensitive
 
